@@ -3,10 +3,20 @@ project('mangobar', 'c',
 )
 
 cc = meson.get_compiler('c')
+add_project_arguments(cc.get_supported_arguments('-Wno-unused-parameter'),
+                      language: 'c')
 deps = [
   dependency('wayland-client'),
+  dependency('wayland-cursor'),
   dependency('fcft'),
   dependency('pixman-1'),
+  dependency('cairo'),
+  dependency('pango'),
+  dependency('pangocairo'),
+  dependency('libpulse'),
+  dependency('libsystemd'),
+  dependency('gdk-pixbuf-2.0'),
+  dependency('alsa'),
   cc.find_library('rt'),
   cc.find_library('cjson'),
 ]
@@ -42,7 +52,11 @@ executable('mangobar',
     xdg_shell_h, xdg_shell_c,
     xdg_output_h, xdg_output_c,
     wlr_layer_h, wlr_layer_c,
-    'mangobar.c'
+    'mangobar.c',
+    'rtconfig.c',
+    'style.c',
+    'tray.c',
+    'menu.c'
   ],
   dependencies: deps,
   install: true

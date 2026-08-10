@@ -1,10 +1,20 @@
 #define _GNU_SOURCE
+#include <alsa/asoundlib.h>
+#include <cairo/cairo.h>
 #include <cjson/cJSON.h>
+#include <math.h>
+#include <pango/pango.h>
+#include <pango/pangocairo.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcft/fcft.h>
 #include <fcntl.h>
+#include <linux/input-event-codes.h>
 #include <pixman.h>
+#include <poll.h>
+#include <pulse/pulseaudio.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,16 +24,58 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <wayland-util.h>
 
-#include "config.h"
+#include "menu.h"
+#include "rtconfig.h"
+#include "style.h"
+#include "tray.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "xdg-output-unstable-v1-protocol.h"
 #include "xdg-shell-protocol.h"
+
+// Default colors (overridable by style.css)
+static const uint32_t active_fg_color_hex = 0x000000FF;
+static const uint32_t active_bg_color_hex = 0x8BAA9BFF;
+static const uint32_t occupied_fg_color_hex = 0xc3b695FF;
+static const uint32_t occupied_bg_color_hex = 0x201B14FF;
+static const uint32_t inactive_fg_color_hex = 0xC68A93FF;
+static const uint32_t inactive_bg_color_hex = 0x201B14FF;
+static const uint32_t urgent_fg_color_hex = 0x201B14FF;
+static const uint32_t urgent_bg_color_hex = 0xDBD0C6FF;
+static const uint32_t empty_fg_color_hex = 0xC68A93FF;
+static const uint32_t empty_bg_color_hex = 0x201B14FF;
+static const uint32_t layout_fg_color_hex = 0xC68A93FF;
+static const uint32_t layout_bg_color_hex = 0x201B14FF;
+static const uint32_t title_fg_color_hex = 0xC68A93FF;
+static const uint32_t title_bg_color_hex = 0x201B14FF;
+static const uint32_t cpu_fg_color_hex = 0xC68A93FF;
+static const uint32_t cpu_bg_color_hex = 0x201B14FF;
+static const uint32_t mem_fg_color_hex = 0xC68A93FF;
+static const uint32_t mem_bg_color_hex = 0x201B14FF;
+static const uint32_t brightness_fg_color_hex = 0xC68A93FF;
+static const uint32_t brightness_bg_color_hex = 0x201B14FF;
+static const uint32_t volume_fg_color_hex = 0xC68A93FF;
+static const uint32_t volume_bg_color_hex = 0x201B14FF;
+static const uint32_t clock_fg_color_hex = 0xC68A93FF;
+static const uint32_t clock_bg_color_hex = 0x201B14FF;
+static const uint32_t keymode_fg_color_hex = 0xC68A93FF;
+static const uint32_t keymode_bg_color_hex = 0x201B14FF;
+static const uint32_t keyboardlayout_fg_color_hex = 0xC68A93FF;
+static const uint32_t keyboardlayout_bg_color_hex = 0x201B14FF;
+static const uint32_t tray_fg_color_hex = 0xFFFFFFFF;
+static const uint32_t tray_bg_color_hex = 0x201B14FF;
+static const uint32_t overview_fg_color_hex = 0x111012FF;
+static const uint32_t overview_bg_color_hex = 0x718b80FF;
+static const uint32_t separator_fg_color_hex = 0xC68A93FF;
+static const uint32_t separator_bg_color_hex = 0x201B14FF;
+static const uint32_t middle_bg_color_hex = 0x201B14FF;
+static const uint32_t middle_bg_sel_color_hex = 0x201B14FF;
 
 static uint32_t utf8_decode(uint32_t *state, uint32_t *codep, uint8_t byte) {
   static const uint8_t len_tab[] = {0, 0, 0, 0, 0, 0, 0, 0,
@@ -78,7 +130,7 @@ static void truncate_utf8_string(char *dest, const char *src, size_t dest_size,
   dest[last_valid_len] = '\0';
 }
 
-/* ---------- 颜色工具 ---------- */
+// ---------- Color helpers ----------
 static void hex_to_pixman(uint32_t hex, pixman_color_t *c) {
   c->red = ((hex >> 24) & 0xff) * 0x101;
   c->green = ((hex >> 16) & 0xff) * 0x101;
@@ -86,7 +138,160 @@ static void hex_to_pixman(uint32_t hex, pixman_color_t *c) {
   c->alpha = (hex & 0xff) * 0x101;
 }
 
-/* ---------- Bar ---------- */
+static void pixman_color_to_doubles(const pixman_color_t *c, double *r,
+                                    double *g, double *b, double *a) {
+  *r = c->red / 65535.0;
+  *g = c->green / 65535.0;
+  *b = c->blue / 65535.0;
+  *a = c->alpha / 65535.0;
+}
+
+static void cairo_rounded_rect(cairo_t *cr, double x, double y, double w,
+                               double h, double r) {
+  if (r > h / 2)
+    r = h / 2;
+  if (r > w / 2)
+    r = w / 2;
+  if (r < 0)
+    r = 0;
+  cairo_new_path(cr);
+  cairo_move_to(cr, x + r, y);
+  cairo_arc(cr, x + w - r, y + r, r, -M_PI_2, 0);
+  cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI_2);
+  cairo_arc(cr, x + r, y + h - r, r, M_PI_2, M_PI);
+  cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI_2);
+  cairo_close_path(cr);
+}
+
+// ---------- Module style ----------
+typedef struct {
+  pixman_color_t fg, bg;
+  int pad_l, pad_r;
+  int margin_l, margin_r;
+  int radius; // 0=default, -1=pill, >0=explicit radius
+  int min_width; // minimum module width
+  bool center; // center text (tag buttons)
+} ModuleStyle;
+
+// Tag states: 0=active 1=occupied 2=urgent 3=empty 4=inactive
+static ModuleStyle st_tags[5];
+static ModuleStyle st_layout, st_title, st_clock, st_clock_date, st_cpu, st_mem;
+static ModuleStyle st_network;
+static ModuleStyle st_brightness, st_volume;
+static ModuleStyle st_keymode, st_keyboardlayout;
+static ModuleStyle st_custom[MANGOBAR_MAX_CUSTOM];
+static ModuleStyle st_overview, st_separator, st_tray, st_bar, st_bar_sel;
+
+static StyleSheet g_style_sheet;
+static cairo_t *bar_bg_cr; // cairo context for module backgrounds
+static int bar_top; // content offset from surface top (CSS margin-top)
+static uint32_t bar_h; // content height (logical px)
+static uint32_t bar_left; // content offset from left (CSS margin-left)
+static uint32_t bar_right; // content offset from right (CSS margin-right)
+
+// ---------- Format helpers ----------
+static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x);
+
+static void format_value(const char *fmt, const char *value, const char *icon,
+                         char *out, size_t outsz) {
+  if (!fmt || !*fmt) {
+    snprintf(out, outsz, "%s", value ? value : "");
+    return;
+  }
+  size_t o = 0;
+  const char *p = fmt;
+  while (*p && o + 1 < outsz) {
+    if (p[0] == '{' && p[1] == '}') {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 2;
+    } else if (strncmp(p, "{percent}", 9) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 9;
+    } else if (strncmp(p, "{load}", 6) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 6;
+    } else if (strncmp(p, "{usage}", 7) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 7;
+    } else if (strncmp(p, "{volume}", 8) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 8;
+    } else if (strncmp(p, "{title}", 7) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 7;
+    } else if (strncmp(p, "{layout}", 8) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 8;
+    } else if (strncmp(p, "{ifname}", 8) == 0) {
+      if (value)
+        o += snprintf(out + o, outsz - o, "%s", value);
+      p += 8;
+    } else if (strncmp(p, "{icon}", 6) == 0) {
+      if (icon)
+        o += snprintf(out + o, outsz - o, "%s", icon);
+      p += 6;
+    } else {
+      out[o++] = *p++;
+    }
+  }
+  out[o] = '\0';
+}
+
+static void format_int(const char *fmt, int value, const char *icon, char *out,
+                       size_t outsz) {
+  char tmp[32];
+  snprintf(tmp, sizeof(tmp), "%d", value);
+  format_value(fmt, tmp, icon, out, outsz);
+}
+
+// Speed units: KB/s under 1MB/s, otherwise MB/s
+static void format_speed(double kbps, char *out, size_t outsz) {
+  if (kbps >= 1024.0)
+    snprintf(out, outsz, "%.1fMB/s", kbps / 1024.0);
+  else
+    snprintf(out, outsz, "%.0fKB/s", kbps);
+}
+
+// Truncate text to available width (with "..."), for window etc.
+static void fit_text_width(const char *text, char *out, size_t outsz,
+                           uint32_t avail, uint32_t pads) {
+  char tmp[256];
+  int maxc = 256;
+  while (maxc > 0) {
+    truncate_utf8_string(tmp, text, sizeof(tmp), maxc);
+    int32_t mn, mx;
+    uint32_t tw = text_metrics(tmp, &mn, &mx);
+    if (tw + pads + 16 <= avail || maxc <= 1) {
+      snprintf(out, outsz, "%s", tmp);
+      return;
+    }
+    maxc -= 8;
+  }
+  out[0] = '\0';
+}
+
+// ---------- Bar ----------
+#define MAX_HOTSPOTS 64
+#define MAX_TRAY_HOTSPOTS 16
+
+typedef struct {
+  char module[64];
+  int tag; // -1 = not a tag
+  uint32_t x1, x2; // logical coords
+} Hotspot;
+
+typedef struct {
+  MangobarTrayItem *item;
+  uint32_t x1, x2; // logical coords
+} TrayHotspot;
+
 typedef struct {
   struct wl_output *wl_output;
   struct wl_surface *wl_surface;
@@ -94,6 +299,8 @@ typedef struct {
   struct zxdg_output_v1 *xdg_output;
   uint32_t registry_name;
   char *name;
+  int out_x, out_y; // output position in global coords
+  int out_w, out_h; // output logical size
   bool configured;
   uint32_t width, height;
   uint32_t stride, bufsize;
@@ -105,9 +312,18 @@ typedef struct {
   char keymode[32];
   char kb_layout[16];
   int cpu_pct, mem_pct;
+  int brightness_pct, volume_pct;
+  bool volume_muted;
   char time_str[16];
+  bool net_speed_mode;
+  char net_ifname[64];
+  double net_rx_kbps, net_tx_kbps;
   bool redraw;
-  bool overview_mode; // 当 active_tags == [0] 时为 true
+  bool overview_mode; // true when active_tags == [0]
+  Hotspot hotspots[MAX_HOTSPOTS];
+  int hotspot_count;
+  TrayHotspot tray_hotspots[MAX_TRAY_HOTSPOTS];
+  int tray_hotspot_count;
   struct wl_list link;
 } Bar;
 
@@ -120,31 +336,40 @@ static struct wl_list bar_list;
 static struct fcft_font *font;
 static bool running = true;
 
+static struct wl_seat *seat;
+static struct wl_pointer *pointer;
+static struct wl_cursor_theme *cursor_theme;
+static struct wl_surface *cursor_surface;
+static Bar *pointer_bar;
+static double pointer_x, pointer_y;
+static int axis_steps[2];
+static wl_fixed_t axis_value[2];
+static bool sys_refresh; // force immediate system info refresh
+
+static const struct wl_pointer_listener pointer_listener;
+
+static MangobarTray *tray;
+
 static int ipc_fd = -1;
 static char ipc_buf[65536];
 static size_t ipc_buf_len = 0;
 
-/* 颜色变量 */
-static pixman_color_t active_fg, active_bg;
-static pixman_color_t occupied_fg, occupied_bg;
-static pixman_color_t inactive_fg, inactive_bg;
-static pixman_color_t urgent_fg, urgent_bg;
-static pixman_color_t empty_fg, empty_bg;
-static pixman_color_t middle_bg, middle_bg_sel;
+// IPC debug log: enabled with MANGOBAR_LOG_IPC=1
+#define IPC_LOG(...)                                                           \
+  do {                                                                         \
+    if (getenv("MANGOBAR_LOG_IPC")) {                                          \
+      struct timespec ts;                                                      \
+      clock_gettime(CLOCK_MONOTONIC, &ts);                                     \
+      fprintf(stderr, "[%ld.%03ld] ", (long)ts.tv_sec,                        \
+              ts.tv_nsec / 1000000);                                           \
+      fprintf(stderr, __VA_ARGS__);                                            \
+    }                                                                          \
+  } while (0)
 
-static pixman_color_t layout_fg, layout_bg;
-static pixman_color_t title_fg, title_bg;
-static pixman_color_t cpu_fg, cpu_bg;
-static pixman_color_t mem_fg, mem_bg;
-static pixman_color_t clock_fg, clock_bg;
-static pixman_color_t keymode_fg, keymode_bg;
-static pixman_color_t keyboardlayout_fg, keyboardlayout_bg;
-static pixman_color_t overview_fg, overview_bg;
-static pixman_color_t separator_fg, separator_bg;
-
-/* ========== Wayland 缓冲 ========== */
+// ========== Wayland buffers ==========
 static void wl_buffer_release(void *data, struct wl_buffer *wl_buffer) {
-  (void)data;
+  static unsigned long released;
+  IPC_LOG("[buf] release #%lu\n", ++released);
   wl_buffer_destroy(wl_buffer);
 }
 static const struct wl_buffer_listener wl_buffer_listener = {
@@ -162,15 +387,39 @@ static int allocate_shm_file(size_t size) {
   return fd;
 }
 
-/* ========== 文本绘制 ========== */
-static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
-                          pixman_image_t *fg, pixman_image_t *fg_mask,
-                          pixman_image_t *bg, pixman_color_t *fg_color,
-                          pixman_color_t *bg_color, uint32_t max_x,
-                          uint32_t buf_h) {
-  if (!text || !*text || x >= max_x)
-    return x;
-  uint32_t cur_x = x;
+// Create a fully transparent wl_buffer (for the grab layer)
+static struct wl_buffer *create_transparent_buffer(uint32_t w, uint32_t h,
+                                                   uint32_t *stride_out,
+                                                   uint32_t *bufsize_out) {
+  uint32_t stride = w * 4;
+  uint32_t bufsize = stride * h;
+  int fd = allocate_shm_file(bufsize);
+  if (fd < 0)
+    return NULL;
+  uint8_t *data = mmap(NULL, bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (data == MAP_FAILED) {
+    close(fd);
+    return NULL;
+  }
+  memset(data, 0, bufsize);
+  munmap(data, bufsize);
+  struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, bufsize);
+  struct wl_buffer *buf = wl_shm_pool_create_buffer(
+      pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+  wl_shm_pool_destroy(pool);
+  close(fd);
+  if (stride_out)
+    *stride_out = stride;
+  if (bufsize_out)
+    *bufsize_out = bufsize;
+  return buf;
+}
+
+// ========== Text drawing ==========
+// Measure rendered text width and bounds (incl. glyph bearings) in px
+static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x) {
+  int32_t mn = INT32_MAX, mx = INT32_MIN;
+  int32_t pen = 0;
   uint32_t state = 0, codepoint = 0, last_cp = 0;
   for (const char *p = text; *p; p++) {
     if (utf8_decode(&state, &codepoint, (uint8_t)*p))
@@ -182,54 +431,209 @@ static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
     long kern = 0;
     if (last_cp)
       fcft_kerning(font, last_cp, codepoint, &kern, NULL);
-    uint32_t advance = g->advance.x + kern;
-    if (cur_x + advance + 4 > max_x)
+    pen += (int32_t)kern;
+    int32_t gx = pen + g->x;
+    if (gx < mn)
+      mn = gx;
+    int32_t gx2 = gx + g->width;
+    if (gx2 > mx)
+      mx = gx2;
+    pen += g->advance.x;
+    last_cp = codepoint;
+  }
+  if (min_x)
+    *min_x = mn == INT32_MAX ? 0 : mn;
+  if (max_x)
+    *max_x = mx == INT32_MIN ? 0 : mx;
+  return mn == INT32_MAX ? 0 : (uint32_t)(mx - mn);
+}
+
+static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
+                          pixman_image_t *fg, pixman_image_t *fg_mask,
+                          pixman_image_t *bg, pixman_color_t *fg_color,
+                          pixman_color_t *bg_color, uint32_t max_x,
+                          uint32_t buf_h) {
+  if (!text || !*text || x >= max_x)
+    return x;
+  // x is the glyph-box left; pen starts minus the first glyph's left bearing
+  int32_t mn = 0;
+  text_metrics(text, &mn, NULL);
+  int32_t pen = (int32_t)x - mn;
+  uint32_t state = 0, codepoint = 0, last_cp = 0;
+  for (const char *p = text; *p; p++) {
+    if (utf8_decode(&state, &codepoint, (uint8_t)*p))
+      continue;
+    const struct fcft_glyph *g =
+        fcft_rasterize_char_utf32(font, codepoint, FCFT_SUBPIXEL_NONE);
+    if (!g)
+      continue;
+    long kern = 0;
+    if (last_cp)
+      fcft_kerning(font, last_cp, codepoint, &kern, NULL);
+    pen += (int32_t)kern;
+    int32_t gx = pen + g->x;
+    int32_t gx2 = gx + g->width;
+    if (gx >= (int32_t)max_x)
       break;
     last_cp = codepoint;
 
     if (fg && fg_color) {
       if (pixman_image_get_format(g->pix) == PIXMAN_a8r8g8b8) {
         pixman_image_composite32(PIXMAN_OP_OVER, g->pix, NULL, fg, 0, 0, 0, 0,
-                                 cur_x + g->x, y - g->y, g->width, g->height);
+                                 gx, y - g->y, g->width, g->height);
       } else {
         pixman_image_fill_boxes(
             PIXMAN_OP_OVER, fg, fg_color, 1,
-            &(pixman_box32_t){
-                .x1 = cur_x, .x2 = cur_x + advance, .y1 = 0, .y2 = buf_h});
+            &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = buf_h});
       }
       pixman_image_t *mask = pixman_image_create_solid_fill(
           &(pixman_color_t){0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF});
       pixman_image_composite32(PIXMAN_OP_OVER, g->pix, mask, fg_mask, 0, 0, 0,
-                               0, cur_x + g->x, y - g->y, g->width, g->height);
+                               0, gx, y - g->y, g->width, g->height);
       pixman_image_unref(mask);
     }
     if (bg && bg_color)
       pixman_image_fill_boxes(
           PIXMAN_OP_OVER, bg, bg_color, 1,
-          &(pixman_box32_t){
-              .x1 = cur_x, .x2 = cur_x + advance, .y1 = 0, .y2 = buf_h});
-    cur_x += advance;
+          &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = buf_h});
+    pen += g->advance.x;
   }
-  return cur_x;
+  return (uint32_t)(pen - mn);
 }
 
-static uint32_t text_width(const char *text) {
-  uint32_t w = 0, state = 0, codepoint = 0;
-  for (const char *p = text; *p; p++) {
-    if (utf8_decode(&state, &codepoint, (uint8_t)*p))
-      continue;
-    const struct fcft_glyph *g =
-        fcft_rasterize_char_utf32(font, codepoint, FCFT_SUBPIXEL_NONE);
-    if (g)
-      w += g->advance.x;
+// ---------- Hotspots ----------
+static void record_hotspot(Bar *bar, const char *module, int tag, uint32_t x1,
+                           uint32_t x2) {
+  if (bar->hotspot_count >= MAX_HOTSPOTS)
+    return;
+  uint32_t s = g_cfg.buffer_scale > 0 ? (uint32_t)g_cfg.buffer_scale : 1;
+  Hotspot *h = &bar->hotspots[bar->hotspot_count++];
+  snprintf(h->module, sizeof(h->module), "%s", module ? module : "");
+  h->tag = tag;
+  h->x1 = x1 / s;
+  h->x2 = x2 / s;
+}
+
+static void record_tray_hotspot(Bar *bar, MangobarTrayItem *item, uint32_t x1,
+                                uint32_t x2) {
+  if (bar->tray_hotspot_count >= MAX_TRAY_HOTSPOTS)
+    return;
+  uint32_t s = g_cfg.buffer_scale > 0 ? (uint32_t)g_cfg.buffer_scale : 1;
+  bar->tray_hotspots[bar->tray_hotspot_count++] =
+      (TrayHotspot){item, x1 / s, x2 / s};
+}
+
+// Draw a module (background + text + record hotspot)
+static int module_radius(const ModuleStyle *st, uint32_t h) {
+  int r = st->radius > 0 ? st->radius : g_cfg.radius_default;
+  if (st->radius < 0)
+    r = (int)h / 2;
+  if (r > (int)h / 2)
+    r = (int)h / 2;
+  if (r < 0)
+    r = 0;
+  return r;
+}
+
+static uint32_t draw_module(Bar *bar, const char *module, int tag,
+                            const char *text, ModuleStyle *st, uint32_t x,
+                            uint32_t y, pixman_image_t *fg,
+                            pixman_image_t *fg_mask, pixman_image_t *bg,
+                            uint32_t max_x, uint32_t buf_h) {
+  if (!text || !*text)
+    return x;
+  int32_t mn = 0, mx = 0;
+  uint32_t tw = text_metrics(text, &mn, &mx);
+  uint32_t body = tw + st->pad_l + st->pad_r;
+  uint32_t mw = body + st->margin_l + st->margin_r;
+  if ((int)mw < st->min_width) {
+    mw = (uint32_t)st->min_width;
+    body = mw - st->margin_l - st->margin_r;
   }
-  return w;
+  uint32_t x0 = x;
+  uint32_t x1 = x + st->margin_l;
+  uint32_t x2 = x1 + body;
+  if (x2 > max_x)
+    x2 = max_x;
+  if (x2 > x1) {
+    int rad = module_radius(st, buf_h);
+    // Rounded background
+    if (bar_bg_cr) {
+      double r, g, b, a;
+      pixman_color_to_doubles(&st->bg, &r, &g, &b, &a);
+      cairo_set_source_rgba(bar_bg_cr, r, g, b, a);
+      cairo_rounded_rect(bar_bg_cr, x1, bar_top, (double)(x2 - x1),
+                                (double)buf_h, rad);
+      cairo_fill(bar_bg_cr);
+    } else {
+      pixman_image_fill_boxes(
+          PIXMAN_OP_OVER, bg, &st->bg, 1,
+          &(pixman_box32_t){.x1 = x1, .x2 = x2, .y1 = bar_top,
+                            .y2 = bar_top + buf_h});
+    }
+    uint32_t text_x = x1 + st->pad_l;
+    if (st->center) {
+      uint32_t body_w = x2 - x1;
+      uint32_t inner = body_w - st->pad_l - st->pad_r;
+      if (tw < inner)
+        text_x = x1 + st->pad_l + (inner - tw) / 2;
+    }
+    draw_text(text, text_x, y, fg, fg_mask, NULL, &st->fg, NULL, max_x, buf_h);
+  }
+  x += mw;
+  record_hotspot(bar, module, tag, x0, x);
+  return x;
+}
+
+// Fill custom module text and CSS/action name; false when disabled
+static bool custom_module_text(int ci, char *dst, size_t dstsz, char *name,
+                               size_t namesz) {
+  if (ci < 0 || ci >= g_cfg.custom_count || !g_cfg.customs[ci].enabled)
+    return false;
+  const MangoCustomModule *cm = &g_cfg.customs[ci];
+  format_value(cm->format, cm->output, "", dst, dstsz);
+  snprintf(name, namesz, "custom-%s", cm->name);
+  return true;
+}
+
+// Scale and draw a tray icon (nearest neighbor)
+static void draw_tray_icon(pixman_image_t *dst, pixman_image_t *icon,
+                           int dst_size, int dx, int dy) {
+  if (!icon || dst_size <= 0)
+    return;
+  int sw = pixman_image_get_width(icon);
+  int sh = pixman_image_get_height(icon);
+  if (sw <= 0 || sh <= 0)
+    return;
+  const uint32_t *src = (const uint32_t *)pixman_image_get_data(icon);
+  pixman_image_t *scaled = pixman_image_create_bits(
+      PIXMAN_a8r8g8b8, dst_size, dst_size, NULL, dst_size * 4);
+  if (!scaled)
+    return;
+  uint32_t *dstbuf = (uint32_t *)pixman_image_get_data(scaled);
+  for (int yy = 0; yy < dst_size; yy++) {
+    int sy = yy * sh / dst_size;
+    if (sy >= sh)
+      sy = sh - 1;
+    for (int xx = 0; xx < dst_size; xx++) {
+      int sx = xx * sw / dst_size;
+      if (sx >= sw)
+        sx = sw - 1;
+      dstbuf[yy * dst_size + xx] = src[sy * sw + sx];
+    }
+  }
+  pixman_image_composite32(PIXMAN_OP_OVER, scaled, NULL, dst, 0, 0, 0, 0, dx,
+                           dy, dst_size, dst_size);
+  pixman_image_unref(scaled);
 }
 
 static void draw_bar(Bar *bar) {
+  IPC_LOG("[draw] %s enter\n", bar->name);
   int fd = allocate_shm_file(bar->bufsize);
-  if (fd < 0)
+  if (fd < 0) {
+    IPC_LOG("[draw] %s shm alloc FAILED\n", bar->name);
     return;
+  }
   uint32_t *data =
       mmap(NULL, bar->bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (data == MAP_FAILED) {
@@ -253,143 +657,334 @@ static void draw_bar(Bar *bar) {
   pixman_image_t *bg = pixman_image_create_bits(
       PIXMAN_a8r8g8b8, bar->width, bar->height, NULL, bar->width * 4);
 
-  uint32_t x = 0;
-  uint32_t y = (bar->height + font->ascent - font->descent) / 2;
+  pixman_color_t transparent = {0, 0, 0, 0};
+  pixman_image_fill_boxes(
+      PIXMAN_OP_SRC, final, &transparent, 1,
+      &(pixman_box32_t){.x1 = 0, .x2 = bar->width, .y1 = 0, .y2 = bar->height});
+  pixman_image_fill_boxes(
+      PIXMAN_OP_SRC, bg, &transparent, 1,
+      &(pixman_box32_t){.x1 = 0, .x2 = bar->width, .y1 = 0, .y2 = bar->height});
 
-  /* --- 1. 左侧模块：标签 --- */
-  if (show_tags) {
+  // Wrap bg in cairo for rounded module backgrounds
+  bar_bg_cr = NULL;
+  {
+    uint32_t *bgdata = (uint32_t *)pixman_image_get_data(bg);
+    if (bgdata) {
+      cairo_surface_t *cs = cairo_image_surface_create_for_data(
+          (unsigned char *)bgdata, CAIRO_FORMAT_ARGB32, bar->width,
+          bar->height, bar->width * 4);
+      if (cairo_surface_status(cs) == CAIRO_STATUS_SUCCESS) {
+        bar_bg_cr = cairo_create(cs);
+        cairo_set_antialias(bar_bg_cr, CAIRO_ANTIALIAS_BEST);
+      }
+      cairo_surface_destroy(cs);
+    }
+  }
+
+  bar->hotspot_count = 0;
+  bar->tray_hotspot_count = 0;
+
+  uint32_t y = (uint32_t)bar_top + (bar_h + font->ascent - font->descent) / 2;
+
+  // --- Build right module list ---
+  struct {
+    const char *text;
+    ModuleStyle *st;
+    const char *module;
+  } modules[MANGOBAR_MAX_RIGHT_MODULES];
+  int mod_count = 0;
+  char mod_text[MANGOBAR_MAX_RIGHT_MODULES][256];
+  char mod_name[MANGOBAR_MAX_RIGHT_MODULES][96];
+  time_t now = time(NULL);
+  struct tm *tm = localtime(&now);
+  for (int i = 0; i < g_cfg.right_count &&
+                   mod_count < MANGOBAR_MAX_RIGHT_MODULES;
+       i++) {
+    int id = g_cfg.right_order[i];
+    ModuleStyle *st = NULL;
+    const char *mname = "";
+    char *dst = mod_text[mod_count];
+    switch (id) {
+    case M_RIGHT_CPU:
+      format_int(g_cfg.cpu_format, bar->cpu_pct, "", dst, sizeof(mod_text[0]));
+      st = &st_cpu;
+      mname = "cpu";
+      break;
+    case M_RIGHT_MEM:
+      format_int(g_cfg.mem_format, bar->mem_pct, "", dst, sizeof(mod_text[0]));
+      st = &st_mem;
+      mname = "mem";
+      break;
+    case M_RIGHT_BRIGHTNESS:
+      format_int(g_cfg.brightness_fmt, bar->brightness_pct, "☀", dst,
+                 sizeof(mod_text[0]));
+      st = &st_brightness;
+      mname = "brightness";
+      break;
+    case M_RIGHT_VOLUME:
+      if (bar->volume_muted)
+        format_int(g_cfg.volume_fmt_muted, bar->volume_pct, "🔇", dst,
+                   sizeof(mod_text[0]));
+      else
+        format_int(g_cfg.volume_fmt, bar->volume_pct, "", dst,
+                   sizeof(mod_text[0]));
+      st = &st_volume;
+      mname = "volume";
+      break;
+    case M_RIGHT_CLOCK_TIME:
+      strftime(dst, sizeof(mod_text[0]), g_cfg.clock_time_format, tm);
+      st = &st_clock;
+      mname = "clock";
+      break;
+    case M_RIGHT_CLOCK_DATE:
+      strftime(dst, sizeof(mod_text[0]), g_cfg.clock_date_format, tm);
+      st = &st_clock_date;
+      mname = "clock";
+      break;
+    case M_RIGHT_KEYMODE:
+      format_value(g_cfg.keymode_format, bar->keymode, "", dst,
+                   sizeof(mod_text[0]));
+      st = &st_keymode;
+      mname = "keymode";
+      break;
+    case M_RIGHT_KBLAYOUT:
+      format_value(g_cfg.keyboardlayout_format, bar->kb_layout, "", dst,
+                   sizeof(mod_text[0]));
+      st = &st_keyboardlayout;
+      mname = "keyboardlayout";
+      break;
+    case M_RIGHT_NETWORK: {
+      if (bar->net_speed_mode) {
+        char down[32], up[32];
+        format_speed(bar->net_rx_kbps, down, sizeof(down));
+        format_speed(bar->net_tx_kbps, up, sizeof(up));
+        snprintf(dst, sizeof(mod_text[0]), "↓%.16s ↑%.16s", down, up);
+      } else {
+        format_value(g_cfg.network_format, bar->net_ifname, "", dst,
+                     sizeof(mod_text[0]));
+      }
+      st = &st_network;
+      mname = "network";
+      break;
+    }
+    case M_CUSTOM: {
+      char *nm = mod_name[mod_count];
+      if (!custom_module_text(id - M_CUSTOM, dst, sizeof(mod_text[0]), nm,
+                              sizeof(mod_name[0])))
+        continue;
+      st = &st_custom[id - M_CUSTOM];
+      mname = nm;
+      break;
+    }
+    default:
+      continue;
+    }
+    if (dst[0])
+      modules[mod_count++] =
+          (typeof(modules[0])){mod_text[mod_count - 1], st, mname};
+  }
+
+  // Visible tray items
+  int tray_vis_count = 0;
+  MangobarTrayItem **tray_items = NULL;
+  if (g_cfg.enable_tray && tray)
+    tray_items = tray_visible_items(tray, &tray_vis_count);
+
+  // Total right width (no separators between modules)
+  uint32_t right_total_w = 0;
+  for (int i = 0; i < mod_count; i++) {
+    int32_t mn, mx;
+    uint32_t tw = text_metrics(modules[i].text, &mn, &mx);
+    uint32_t body = tw + modules[i].st->pad_l + modules[i].st->pad_r;
+    uint32_t mw = body + modules[i].st->margin_l + modules[i].st->margin_r;
+    if ((int)mw < modules[i].st->min_width)
+      mw = (uint32_t)modules[i].st->min_width;
+    right_total_w += mw;
+  }
+
+  // Tray area
+  uint32_t tray_w = 0;
+  int tray_icon_size = 0;
+  if (tray_vis_count > 0) {
+    tray_icon_size = g_cfg.tray_icon_size > 0
+                         ? g_cfg.tray_icon_size
+                         : (int)bar_h - 2 * g_cfg.tray_pad;
+    if (tray_icon_size < 8)
+      tray_icon_size = 8;
+    if (tray_icon_size > (int)bar_h - 2 * g_cfg.tray_pad)
+      tray_icon_size = (int)bar_h - 2 * g_cfg.tray_pad;
+    tray_w = (uint32_t)(tray_vis_count * tray_icon_size +
+                        (tray_vis_count - 1) * g_cfg.tray_gap +
+                        st_tray.pad_l + st_tray.pad_r + st_tray.margin_l +
+                        st_tray.margin_r);
+  }
+
+  uint32_t right_edge =
+      bar->width > bar_right ? bar->width - bar_right : 0;
+  // Right group (tray leftmost + modules) right-aligned
+  right_total_w += tray_w;
+  uint32_t right_group_left =
+      right_edge > right_total_w ? right_edge - right_total_w : 0;
+  uint32_t left_max = right_group_left;
+
+  // --- 1. Left modules: tags (limited by right group) ---
+  uint32_t x = bar_left;
+  if (g_cfg.enable_tags) {
     if (bar->overview_mode) {
-      /* 当 active_tags == [0] 时，只显示 OVERVIEW */
-      x = draw_text("OVERVIEW", x, y, fg, fg_mask, bg, &overview_fg,
-                    &overview_bg, bar->width, bar->height);
+      if (x < left_max)
+        x = draw_module(bar, "tags", -1, g_cfg.overview_label, &st_overview, x,
+                        y, fg, fg_mask, bg, left_max, bar_h);
     } else {
-      for (int i = 0; i < TAG_COUNT; i++) {
-        /* 过滤条件：如果配置为只显示占用标签，则跳过既无客户端又不在
-         * active_tags 中的标签 */
-#if show_only_occupied_tags
-        if (!(bar->ctags & (1 << i)) && !(bar->atags & (1 << i)))
+      for (int i = 0; i < g_cfg.tag_count; i++) {
+        if (x >= left_max)
+          break;
+        if (g_cfg.only_occupied &&
+            !(bar->ctags & (1 << i)) && !(bar->atags & (1 << i)))
           continue;
-#endif
         bool active = bar->mtags & (1 << i);
         bool urgent = bar->urg & (1 << i);
         bool occupied = bar->ctags & (1 << i);
-        pixman_color_t *f, *b;
-        if (urgent) {
-          f = &urgent_fg;
-          b = &urgent_bg;
-        } else if (active) {
-          f = &active_fg;
-          b = &active_bg;
-        } else if (occupied) {
-          f = &occupied_fg;
-          b = &occupied_bg;
-        } else {
-          f = &empty_fg;
-          b = &empty_bg;
-        }
-        x = draw_text(tag_names[i], x, y, fg, fg_mask, bg, f, b, bar->width,
-                      bar->height);
+        ModuleStyle *st;
+        if (urgent)
+          st = &st_tags[2];
+        else if (active)
+          st = &st_tags[0];
+        else if (occupied)
+          st = &st_tags[1];
+        else
+          st = &st_tags[3];
+        x = draw_module(bar, "tags", i, g_cfg.tag_names[i], st, x, y, fg,
+                        fg_mask, bg, left_max, bar_h);
       }
     }
   }
 
-  /* 布局模块 */
-  if (show_layout) {
-    x = draw_text(bar->layout, x, y, fg, fg_mask, bg, &layout_fg, &layout_bg,
-                  bar->width, bar->height);
+  // Layout module
+  if (g_cfg.enable_layout && x < left_max) {
+    char layout_text[64];
+    format_value(g_cfg.layout_format, bar->layout, "", layout_text,
+                 sizeof(layout_text));
+    x = draw_module(bar, "layout", -1, layout_text, &st_layout, x, y, fg,
+                    fg_mask, bg, left_max, bar_h);
   }
-
-  /* --- 右侧模块列表构建 --- */
-  struct {
-    const char *text;
-    pixman_color_t *fg;
-    pixman_color_t *bg;
-    bool enabled;
-  } modules[5];
-  int mod_count = 0;
-
-  char mod_text[5][64];
-  int idx = 0;
-
-  if (show_keymode) {
-    snprintf(mod_text[idx], sizeof(mod_text[idx]), "%s", bar->keymode);
-    modules[idx++] =
-        (typeof(modules[0])){mod_text[idx - 1], &keymode_fg, &keymode_bg, true};
-  }
-  if (show_keyboardlayout) {
-    snprintf(mod_text[idx], sizeof(mod_text[idx]), "%s", bar->kb_layout);
-    modules[idx++] = (typeof(modules[0])){mod_text[idx - 1], &keyboardlayout_fg,
-                                          &keyboardlayout_bg, true};
-  }
-  if (show_cpu) {
-    snprintf(mod_text[idx], sizeof(mod_text[idx]), "CPU:%d%%", bar->cpu_pct);
-    modules[idx++] =
-        (typeof(modules[0])){mod_text[idx - 1], &cpu_fg, &cpu_bg, true};
-  }
-  if (show_mem) {
-    snprintf(mod_text[idx], sizeof(mod_text[idx]), "MEM:%d%%", bar->mem_pct);
-    modules[idx++] =
-        (typeof(modules[0])){mod_text[idx - 1], &mem_fg, &mem_bg, true};
-  }
-  if (show_clock) {
-    snprintf(mod_text[idx], sizeof(mod_text[idx]), "%s", bar->time_str);
-    modules[idx++] =
-        (typeof(modules[0])){mod_text[idx - 1], &clock_fg, &clock_bg, true};
-  }
-  mod_count = idx;
-
-  /* 计算右侧总宽度（含分隔符） */
-  uint32_t sep_w = text_width(separator_str);
-  uint32_t right_total_w = 0;
-  for (int i = 0; i < mod_count; i++) {
-    if (modules[i].enabled) {
-      right_total_w += text_width(modules[i].text);
-      if (i != 0)
-        right_total_w += sep_w;
-    }
-  }
-
-  uint32_t right_start = bar->width - 8 - right_total_w;
-  if (right_start < x)
-    right_start = x;
-
-  /* 中间背景 */
-  if (right_start > x) {
-    pixman_image_fill_boxes(
-        PIXMAN_OP_SRC, bg, bar->sel ? &middle_bg_sel : &middle_bg, 1,
-        &(pixman_box32_t){
-            .x1 = x, .x2 = right_start, .y1 = 0, .y2 = bar->height});
-  }
-
-  /* 标题模块（居中） */
-  if (show_title && bar->title[0] != '\0' && right_start > x) {
-    uint32_t tw = text_width(bar->title);
-    uint32_t center_x = x + (right_start - x - tw) / 2;
-    if (center_x < x + 8)
-      center_x = x + 8;
-    draw_text(bar->title, center_x, y, fg, fg_mask, bg, &title_fg, &title_bg,
-              bar->width, bar->height);
-  }
-
-  /* 绘制右侧模块 */
-  uint32_t cur_x = right_start;
-  for (int i = 0; i < mod_count; i++) {
-    if (!modules[i].enabled)
+  for (int i = 0; i < g_cfg.left_count && x < left_max; i++) {
+    int id = g_cfg.left_order[i];
+    if (id < M_CUSTOM)
       continue;
-    if (i != 0) {
-      cur_x = draw_text(separator_str, cur_x, y, fg, fg_mask, bg, &separator_fg,
-                        &separator_bg, bar->width, bar->height);
+    char text[256], nm[64];
+    if (!custom_module_text(id - M_CUSTOM, text, sizeof(text), nm,
+                            sizeof(nm)))
+      continue;
+    x = draw_module(bar, nm, -1, text, &st_custom[id - M_CUSTOM], x, y, fg,
+                    fg_mask, bg, left_max, bar_h);
+  }
+  uint32_t left_end = x;
+
+  // Right group start: tray first, then right modules
+  uint32_t right_start = right_group_left;
+  if (right_start < left_end)
+    right_start = left_end;
+  if (right_start > right_edge)
+    right_start = right_edge;
+
+  // Middle background + title (title hidden last)
+  if (right_start > left_end) {
+    pixman_image_fill_boxes(
+        PIXMAN_OP_SRC, bg, bar->sel ? &st_bar_sel.bg : &st_bar.bg, 1,
+        &(pixman_box32_t){.x1 = left_end, .x2 = right_start, .y1 = bar_top,
+                          .y2 = bar_top + bar_h});
+    if (g_cfg.enable_title && bar->title[0] != '\0') {
+      uint32_t avail = right_start - left_end;
+      char full_title[256], title_text[256];
+      format_value(g_cfg.title_format, bar->title, "", full_title,
+                   sizeof(full_title));
+      fit_text_width(full_title, title_text, sizeof(title_text), avail,
+                     st_title.pad_l + st_title.pad_r);
+      int32_t mn, mx;
+      uint32_t tw = text_metrics(title_text, &mn, &mx);
+      uint32_t mw = tw + st_title.pad_l + st_title.pad_r + st_title.margin_l +
+                    st_title.margin_r;
+      if ((int)mw < st_title.min_width)
+        mw = (uint32_t)st_title.min_width;
+      if (title_text[0] && mw + 16 <= avail) {
+        uint32_t title_x = left_end;
+        uint32_t x1 = title_x + st_title.margin_l;
+        uint32_t x2 = x1 + mw - st_title.margin_l - st_title.margin_r;
+        if (x2 > right_start)
+          x2 = right_start;
+        if (bar_bg_cr && x2 > x1) {
+          int rad = module_radius(&st_title, bar_h);
+          double r, g, b, a;
+          pixman_color_to_doubles(&st_title.bg, &r, &g, &b, &a);
+          cairo_set_source_rgba(bar_bg_cr, r, g, b, a);
+          cairo_rounded_rect(bar_bg_cr, x1, bar_top, (double)(x2 - x1),
+                             (double)bar_h, rad);
+          cairo_fill(bar_bg_cr);
+          draw_text(title_text, x1 + st_title.pad_l, y, fg, fg_mask, NULL,
+                    &st_title.fg, NULL, right_start, bar_h);
+          record_hotspot(bar, "title", -1, title_x, title_x + mw);
+        }
+      }
     }
-    cur_x = draw_text(modules[i].text, cur_x, y, fg, fg_mask, bg, modules[i].fg,
-                      modules[i].bg, bar->width, bar->height);
   }
 
-  /* 合成最终图像 */
+  // Draw right group: tray first, then modules
+  uint32_t cur_x = right_start;
+  if (tray_vis_count > 0 && cur_x < right_edge) {
+    uint32_t tray_x1 = cur_x + st_tray.margin_l;
+    uint32_t tray_body_w = tray_w - st_tray.margin_l - st_tray.margin_r;
+    if (tray_x1 + tray_body_w > right_edge)
+      tray_body_w = right_edge > tray_x1 ? right_edge - tray_x1 : 0;
+    if (bar_bg_cr && tray_body_w > 0) {
+      double tr, tg, tb, ta;
+      pixman_color_to_doubles(&st_tray.bg, &tr, &tg, &tb, &ta);
+      cairo_set_source_rgba(bar_bg_cr, tr, tg, tb, ta);
+      cairo_rounded_rect(bar_bg_cr, tray_x1, bar_top, (double)tray_body_w,
+                         (double)bar_h, module_radius(&st_tray, bar_h));
+      cairo_fill(bar_bg_cr);
+    }
+    uint32_t cur = tray_x1;
+    int tpad = st_tray.pad_l > 0 ? st_tray.pad_l : g_cfg.tray_pad;
+    for (int i = 0; i < tray_vis_count; i++) {
+      int dx = (int)cur + tpad;
+      int dy = bar_top + ((int)bar_h - tray_icon_size) / 2;
+      draw_tray_icon(bg, tray_item_icon(tray_items[i]), tray_icon_size, dx, dy);
+      record_tray_hotspot(bar, tray_items[i], (uint32_t)cur,
+                          (uint32_t)(cur + tray_icon_size + tpad +
+                                     st_tray.pad_r));
+      cur += (uint32_t)(tray_icon_size + g_cfg.tray_gap);
+    }
+    cur_x += tray_w;
+  }
+  for (int i = 0; i < mod_count; i++) {
+    if (cur_x >= right_edge)
+      break;
+    cur_x = draw_module(bar, modules[i].module, -1, modules[i].text,
+                        modules[i].st, cur_x, y, fg, fg_mask, bg, right_edge,
+                        bar_h);
+  }
+
+  if (bar_bg_cr) {
+    cairo_destroy(bar_bg_cr);
+    bar_bg_cr = NULL;
+  }
+
+  // Composite final image
   pixman_image_composite32(PIXMAN_OP_OVER, bg, NULL, final, 0, 0, 0, 0, 0, 0,
                            bar->width, bar->height);
   pixman_image_set_alpha_map(fg, fg_mask, 0, 0);
   pixman_image_composite32(PIXMAN_OP_OVER, fg, fg_mask, final, 0, 0, 0, 0, 0, 0,
                            bar->width, bar->height);
+
+  if (getenv("MANGOBAR_DUMPPNG") && (bar->atags || bar->ctags)) {
+    cairo_surface_t *dumps = cairo_image_surface_create_for_data(
+        (unsigned char *)data, CAIRO_FORMAT_ARGB32, bar->width, bar->height,
+        bar->stride);
+    cairo_surface_write_to_png(dumps, "/tmp/mangobar_bar.png");
+    cairo_surface_destroy(dumps);
+    fprintf(stderr, "DBG dumped atags=%x ctags=%x mtags=%x title='%s'\n",
+            bar->atags, bar->ctags, bar->mtags, bar->title);
+  }
 
   pixman_image_unref(fg);
   pixman_image_unref(fg_mask);
@@ -397,10 +992,11 @@ static void draw_bar(Bar *bar) {
   pixman_image_unref(final);
   munmap(data, bar->bufsize);
 
-  wl_surface_set_buffer_scale(bar->wl_surface, buffer_scale);
+  wl_surface_set_buffer_scale(bar->wl_surface, g_cfg.buffer_scale);
   wl_surface_attach(bar->wl_surface, buf, 0, 0);
   wl_surface_damage_buffer(bar->wl_surface, 0, 0, bar->width, bar->height);
   wl_surface_commit(bar->wl_surface);
+  IPC_LOG("[draw] %s committed\n", bar->name);
 }
 
 static void layer_surface_configure(void *data,
@@ -410,8 +1006,8 @@ static void layer_surface_configure(void *data,
   zwlr_layer_surface_v1_ack_configure(surface, serial);
   if (bar->configured && w == bar->width && h == bar->height)
     return;
-  bar->width = w * buffer_scale;
-  bar->height = h * buffer_scale;
+  bar->width = w * g_cfg.buffer_scale;
+  bar->height = h * g_cfg.buffer_scale;
   bar->stride = bar->width * 4;
   bar->bufsize = bar->stride * bar->height;
   bar->configured = true;
@@ -420,8 +1016,6 @@ static void layer_surface_configure(void *data,
 
 static void layer_surface_closed(void *data,
                                  struct zwlr_layer_surface_v1 *surface) {
-  (void)data;
-  (void)surface;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -431,7 +1025,6 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
 
 static void output_name_handler(void *data, struct zxdg_output_v1 *xdg_output,
                                 const char *name) {
-  (void)xdg_output;
   Bar *bar = data;
   free(bar->name);
   bar->name = strdup(name);
@@ -440,30 +1033,23 @@ static void output_name_handler(void *data, struct zxdg_output_v1 *xdg_output,
 static void output_logical_position(void *data,
                                     struct zxdg_output_v1 *xdg_output,
                                     int32_t x, int32_t y) {
-  (void)data;
-  (void)xdg_output;
-  (void)x;
-  (void)y;
+  Bar *bar = data;
+  bar->out_x = x;
+  bar->out_y = y;
 }
 
 static void output_logical_size(void *data, struct zxdg_output_v1 *xdg_output,
                                 int32_t width, int32_t height) {
-  (void)data;
-  (void)xdg_output;
-  (void)width;
-  (void)height;
+  Bar *bar = data;
+  bar->out_w = width;
+  bar->out_h = height;
 }
 
 static void output_done(void *data, struct zxdg_output_v1 *xdg_output) {
-  (void)data;
-  (void)xdg_output;
 }
 
 static void output_description(void *data, struct zxdg_output_v1 *xdg_output,
                                const char *description) {
-  (void)data;
-  (void)xdg_output;
-  (void)description;
 }
 
 static const struct zxdg_output_v1_listener output_listener = {
@@ -477,8 +1063,6 @@ static const struct zxdg_output_v1_listener output_listener = {
 static void registry_global(void *data, struct wl_registry *registry,
                             uint32_t name, const char *interface,
                             uint32_t version) {
-  (void)data;
-  (void)version;
   if (strcmp(interface, wl_compositor_interface.name) == 0)
     compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
   else if (strcmp(interface, wl_shm_interface.name) == 0)
@@ -489,26 +1073,31 @@ static void registry_global(void *data, struct wl_registry *registry,
   else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0)
     output_manager =
         wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface, 2);
-  else if (strcmp(interface, wl_output_interface.name) == 0) {
+  else if (strcmp(interface, wl_seat_interface.name) == 0) {
+    seat = wl_registry_bind(registry, name, &wl_seat_interface, 7);
+    pointer = wl_seat_get_pointer(seat);
+    wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+  } else if (strcmp(interface, wl_output_interface.name) == 0) {
     Bar *bar = calloc(1, sizeof(Bar));
     bar->registry_name = name;
     bar->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 1);
     bar->xdg_output =
         zxdg_output_manager_v1_get_xdg_output(output_manager, bar->wl_output);
     zxdg_output_v1_add_listener(bar->xdg_output, &output_listener, bar);
-    bar->height = bar_height * buffer_scale;
+    bar->height = (bar_h + bar_top) * g_cfg.buffer_scale;
     bar->wl_surface = wl_compositor_create_surface(compositor);
     bar->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        layer_shell, bar->wl_surface, bar->wl_output,
-        ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, "mangobar");
+        layer_shell, bar->wl_surface, bar->wl_output, g_cfg.layer, "mangobar");
     zwlr_layer_surface_v1_add_listener(bar->layer_surface,
                                        &layer_surface_listener, bar);
-    zwlr_layer_surface_v1_set_size(bar->layer_surface, 0, bar_height);
+    zwlr_layer_surface_v1_set_size(bar->layer_surface, 0,
+                                   bar_h + bar_top);
     zwlr_layer_surface_v1_set_anchor(bar->layer_surface,
                                      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
                                          ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
                                          ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-    zwlr_layer_surface_v1_set_exclusive_zone(bar->layer_surface, bar_height);
+    zwlr_layer_surface_v1_set_exclusive_zone(bar->layer_surface,
+                                             bar_h + bar_top);
     wl_surface_commit(bar->wl_surface);
     wl_list_insert(&bar_list, &bar->link);
   }
@@ -516,9 +1105,6 @@ static void registry_global(void *data, struct wl_registry *registry,
 
 static void registry_global_remove(void *data, struct wl_registry *registry,
                                    uint32_t name) {
-  (void)data;
-  (void)registry;
-  (void)name;
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -535,6 +1121,7 @@ static Bar *find_bar(const char *name) {
 
 static void update_bar_json(Bar *bar, cJSON *json) {
   cJSON *item;
+  IPC_LOG("[ipc] update %s start\n", bar->name);
   if ((item = cJSON_GetObjectItem(json, "active")))
     bar->sel = cJSON_IsTrue(item);
   if ((item = cJSON_GetObjectItem(json, "layout_symbol")))
@@ -547,7 +1134,7 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     const char *title_str = (t && cJSON_IsString(t)) ? t->valuestring : "";
     const char *appid_str = (a && cJSON_IsString(a)) ? a->valuestring : "";
     truncate_utf8_string(bar->title, title_str, sizeof(bar->title),
-                         max_title_len);
+                         g_cfg.max_title_len);
     snprintf(bar->appid, sizeof(bar->appid), "%s", appid_str);
   } else {
     bar->title[0] = '\0';
@@ -560,7 +1147,7 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     cJSON *tobj;
     cJSON_ArrayForEach(tobj, tags) {
       int idx = cJSON_GetObjectItem(tobj, "index")->valueint - 1;
-      if (idx < 0 || idx >= TAG_COUNT)
+      if (idx < 0 || idx >= g_cfg.tag_count)
         continue;
       if (cJSON_IsTrue(cJSON_GetObjectItem(tobj, "is_active")))
         bar->mtags |= 1 << idx;
@@ -571,9 +1158,9 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     }
   }
 
-  /* 解析 active_tags，设置 atags 并判断 overview_mode */
+  // Parse active_tags into atags and overview_mode
   bar->atags = 0;
-  bar->overview_mode = false; // 默认
+  bar->overview_mode = false; // default
   cJSON *active_tags = cJSON_GetObjectItem(json, "active_tags");
   if (active_tags && cJSON_IsArray(active_tags)) {
     int len = cJSON_GetArraySize(active_tags);
@@ -581,21 +1168,17 @@ static void update_bar_json(Bar *bar, cJSON *json) {
       cJSON *item0 = cJSON_GetArrayItem(active_tags, 0);
       if (cJSON_IsNumber(item0) && item0->valueint == 0) {
         bar->overview_mode = true;
-        // 此时 atags 保持为 0，标签循环会用 overview_mode 绘制
-        // OVERVIEW，不渲染任何具体标签
       } else {
-        // 非 0 的单个数字，正常加入 atags
         int idx = item0->valueint - 1;
-        if (idx >= 0 && idx < TAG_COUNT)
+        if (idx >= 0 && idx < g_cfg.tag_count)
           bar->atags |= (1 << idx);
       }
     } else {
-      // 多个标签，全部加入 atags
       cJSON *elem;
       cJSON_ArrayForEach(elem, active_tags) {
         if (cJSON_IsNumber(elem)) {
           int idx = elem->valueint - 1;
-          if (idx >= 0 && idx < TAG_COUNT)
+          if (idx >= 0 && idx < g_cfg.tag_count)
             bar->atags |= (1 << idx);
         }
       }
@@ -603,15 +1186,20 @@ static void update_bar_json(Bar *bar, cJSON *json) {
   }
 
   bar->redraw = true;
+  IPC_LOG("[ipc] update %s atags=%x ctags=%x mtags=%x title='%s'\n", bar->name,
+          bar->atags, bar->ctags, bar->mtags, bar->title);
 }
 
 static void process_ipc_msg(const char *msg) {
   cJSON *json = cJSON_Parse(msg);
-  if (!json)
+  if (!json) {
+    IPC_LOG("[ipc] parse FAIL: %.100s\n", msg);
     return;
+  }
 
   cJSON *monitors = cJSON_GetObjectItem(json, "monitors");
   if (monitors && cJSON_IsArray(monitors)) {
+    IPC_LOG("[ipc] msg monitors=%d\n", cJSON_GetArraySize(monitors));
     cJSON *monitor;
     cJSON_ArrayForEach(monitor, monitors) {
       cJSON *name = cJSON_GetObjectItem(monitor, "name");
@@ -668,32 +1256,1428 @@ static void process_ipc_data() {
 
 static void ipc_connect() {
   const char *path = getenv("MANGO_INSTANCE_SIGNATURE");
-  if (!path)
+  if (!path) {
+    IPC_LOG("[ipc] connect: MANGO_INSTANCE_SIGNATURE not set\n");
     return;
+  }
   ipc_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (ipc_fd < 0)
+  if (ipc_fd < 0) {
+    IPC_LOG("[ipc] connect: socket failed\n");
     return;
+  }
   struct sockaddr_un addr = {.sun_family = AF_UNIX};
   strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
   if (connect(ipc_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    IPC_LOG("[ipc] connect: connect %s failed\n", path);
     close(ipc_fd);
     ipc_fd = -1;
     return;
   }
   fcntl(ipc_fd, F_SETFL, fcntl(ipc_fd, F_GETFL) | O_NONBLOCK);
+  IPC_LOG("[ipc] connect ok fd=%d path=%s\n", ipc_fd, path);
 }
 
-static void ipc_subscribe(Bar *bar) {
-  if (ipc_fd < 0 || !bar->name)
+static void ipc_subscribe(void) {
+  if (ipc_fd < 0)
     return;
-  char msg[256];
-  snprintf(msg, sizeof(msg), "watch monitor %s\n", bar->name);
-  send(ipc_fd, msg, strlen(msg), MSG_NOSIGNAL);
-  snprintf(msg, sizeof(msg), "watch keymode\nwatch keyboardlayout\n");
-  send(ipc_fd, msg, strlen(msg), MSG_NOSIGNAL);
+  const char *msg = "watch all-monitors\n";
+  ssize_t n = send(ipc_fd, msg, strlen(msg), MSG_NOSIGNAL);
+  IPC_LOG("[ipc] subscribe sent=%zd\n", n);
 }
 
+static void ipc_send_command(const char *fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  // Use a fresh connection for commands.
+  const char *path = getenv("MANGO_INSTANCE_SIGNATURE");
+  if (!path) {
+    IPC_LOG("[cmd] no socket path, cmd='%s'\n", buf);
+    return;
+  }
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    IPC_LOG("[cmd] socket failed, cmd='%s'\n", buf);
+    return;
+  }
+  struct sockaddr_un addr = {.sun_family = AF_UNIX};
+  strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    IPC_LOG("[cmd] connect failed, cmd='%s'\n", buf);
+    close(fd);
+    return;
+  }
+  // Don't block the event loop: wait at most 200ms for the response
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  ssize_t sn = send(fd, buf, strlen(buf), MSG_NOSIGNAL);
+  struct pollfd pfd = {.fd = fd, .events = POLLIN};
+  int pr = poll(&pfd, 1, 200);
+  char tmp[256];
+  ssize_t rn, total = 0;
+  if (pr > 0)
+    while ((rn = recv(fd, tmp, sizeof(tmp), 0)) > 0)
+      total += rn;
+  else
+    rn = pr;
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
+              (t1.tv_nsec - t0.tv_nsec) / 1e6;
+  IPC_LOG("[cmd] '%s' sent=%zd poll=%d recv=%zd total=%d %.2fms\n", buf, sn,
+          pr, rn, (int)total, ms);
+  close(fd);
+}
+
+static void run_command(const char *cmd) {
+  if (!cmd || !*cmd)
+    return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    setsid();
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+      dup2(devnull, 0);
+      dup2(devnull, 1);
+      dup2(devnull, 2);
+      if (devnull > 2)
+        close(devnull);
+    }
+    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+    _exit(127);
+  }
+}
+
+// ---------- Module actions ----------
+static const MangoAction *find_action(const char *module) {
+  for (int i = 0; i < g_cfg.action_count; i++)
+    if (strcmp(g_cfg.actions[i].module, module) == 0)
+      return &g_cfg.actions[i];
+  return NULL;
+}
+
+static void handle_module_action(Bar *bar, const char *module, int tag,
+                                 uint32_t button) {
+  // Network: left click toggles between interface name and speed
+  if (strcmp(module, "network") == 0 && button == BTN_LEFT) {
+    bar->net_speed_mode = !bar->net_speed_mode;
+    bar->redraw = true;
+    sys_refresh = true;
+    IPC_LOG("[click] network toggle speed_mode=%d\n", bar->net_speed_mode);
+    return;
+  }
+  const MangoAction *ma = find_action(module);
+  if (!ma)
+    return;
+  const char *cmd = NULL;
+  if (button == 4)
+    cmd = ma->scroll_up;
+  else if (button == 5)
+    cmd = ma->scroll_down;
+  else if (button == BTN_LEFT)
+    cmd = ma->left;
+  else if (button == BTN_RIGHT)
+    cmd = ma->right;
+  else if (button == BTN_MIDDLE)
+    cmd = ma->middle;
+  if (!cmd)
+    return;
+  IPC_LOG("[click] module=%s tag=%d button=%u cmd='%s'\n", module, tag, button,
+          cmd);
+
+  if (strcmp(module, "tags") == 0 && tag < 0) {
+    // Overview button
+    if (strcmp(cmd, "@view") == 0 || strcmp(cmd, "@toggle") == 0) {
+      ipc_send_command("dispatch toggleoverview\n");
+      return;
+    }
+    return;
+  }
+
+  if (tag >= 0 && strcmp(module, "tags") == 0) {
+    if (strcmp(cmd, "@view") == 0) {
+      ipc_send_command("dispatch view,%d\n", tag + 1);
+      return;
+    }
+    if (strcmp(cmd, "@toggle") == 0) {
+      ipc_send_command("dispatch toggleview,%d\n", tag + 1);
+      return;
+    }
+    if (strcmp(cmd, "@tag") == 0) {
+      ipc_send_command("dispatch tag,%d\n", tag + 1);
+      return;
+    }
+    if (strcmp(cmd, "@toggletag") == 0) {
+      ipc_send_command("dispatch toggletag,%d\n", tag + 1);
+      return;
+    }
+  }
+  if (strncmp(cmd, "@ipc:", 5) == 0) {
+    ipc_send_command("%s\n", cmd + 5);
+    return;
+  }
+  run_command(cmd);
+  // Refresh immediately after brightness/volume changes
+  if (strcmp(module, "brightness") == 0 || strcmp(module, "volume") == 0)
+    sys_refresh = true;
+}
+
+static void menu_open(Bar *bar, MangobarTrayItem *item, double lx, double ly);
+static void tray_right_click(Bar *bar, double x, double y);
+
+static void dispatch_pointer_event(Bar *bar, double x, double y,
+                                   uint32_t button) {
+  if (!bar)
+    return;
+  for (int i = 0; i < bar->tray_hotspot_count; i++) {
+    TrayHotspot *h = &bar->tray_hotspots[i];
+    if (x >= h->x1 && x < h->x2) {
+      if (button == BTN_RIGHT) {
+        tray_right_click(bar, x, y);
+      } else {
+        // Other clicks get global coordinates
+        tray_handle_click(tray, h->item, bar->out_x + x, bar->out_y + y,
+                          button);
+      }
+      return;
+    }
+  }
+  for (int i = 0; i < bar->hotspot_count; i++) {
+    Hotspot *h = &bar->hotspots[i];
+    if (x >= h->x1 && x < h->x2) {
+      handle_module_action(bar, h->module, h->tag, button);
+      return;
+    }
+  }
+  handle_module_action(bar, "bar", -1, button);
+}
+
+// ---------- Tray DBusMenu popup ----------
+#define MENU_PAD_H 10
+#define MENU_PAD_V 4
+
+typedef struct {
+  MangobarMenu *menu;
+  struct wl_surface *surface;
+  struct zwlr_layer_surface_v1 *layer_surface;
+  uint32_t width, height, stride, bufsize;
+  int item_h;
+  int hover; // hovered row (incl. back row), -1 = none
+  uint64_t hover_ms; // hover start time (ms) for delayed submenu open
+  uint64_t outside_since; // time pointer left our surfaces; 0 = inside
+  int lx, ly; // trigger position (output-local coords)
+  int bar_h; // bar height (logical)
+  int out_w, out_h; // output size for bounds clamping
+  MangobarTrayItem *item; // associated tray item
+  struct wl_output *output;
+  // Side submenu
+  struct wl_surface *sub_surface;
+  struct zwlr_layer_surface_v1 *sub_layer_surface;
+  uint32_t sub_width, sub_height, sub_stride, sub_bufsize;
+  int sub_hover;
+  int margin_left, margin_top; // main menu position in the output
+  const MangobarMenuNode *sub_node;
+  bool sub_open;
+  bool sub_configured;
+  // Fullscreen transparent grab layer: catches outside clicks
+  struct wl_surface *grab_surface;
+  struct zwlr_layer_surface_v1 *grab_layer_surface;
+  struct wl_buffer *grab_buffer;
+  uint32_t grab_width, grab_height, grab_stride, grab_bufsize;
+  // Pending open when the Menu property isn't loaded yet
+  MangobarTrayItem *pending_item;
+  Bar *pending_bar;
+  int pending_x, pending_y;
+  uint64_t pending_ms;
+  bool configured;
+  bool open;
+} MenuPopup;
+static MenuPopup popup;
+static bool popup_pointer; // whether pointer is on the popup
+static bool pointer_on_sub; // whether pointer is on the submenu
+
+static void draw_menu_popup(void);
+static void menu_layout_cb(void *data);
+static void submenu_destroy_surface(void);
+static void submenu_close(void);
+static void submenu_open(const MangobarMenuNode *node);
+static void grab_create(Bar *bar);
+static void grab_destroy(void);
+
+static void menu_close(void) {
+  if (!popup.open)
+    return;
+  grab_destroy();
+  submenu_destroy_surface();
+  if (popup.layer_surface)
+    zwlr_layer_surface_v1_destroy(popup.layer_surface);
+  if (popup.surface)
+    wl_surface_destroy(popup.surface);
+  menu_destroy(popup.menu);
+  memset(&popup, 0, sizeof(popup));
+  popup_pointer = false;
+  pointer_on_sub = false;
+}
+
+static uint64_t now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+// Right-click a tray item: open menu, or queue a retry if not ready
+static void tray_right_click(Bar *bar, double x, double y) {
+  for (int i = 0; i < bar->tray_hotspot_count; i++) {
+    TrayHotspot *h = &bar->tray_hotspots[i];
+    if (x >= h->x1 && x < h->x2) {
+      if (tray_item_has_menu(h->item)) {
+        menu_open(bar, h->item, x, y);
+      } else {
+        popup.pending_item = h->item;
+        popup.pending_bar = bar;
+        popup.pending_x = (int)x;
+        popup.pending_y = (int)y;
+        popup.pending_ms = now_ms();
+        tray_refresh(tray);
+      }
+      return;
+    }
+  }
+}
+
+static void update_menu_hover(double y) {
+  int row = popup.item_h > 0 ? (int)(y / popup.item_h) : -1;
+  int rows = menu_visible_count(popup.menu) +
+             (menu_in_submenu(popup.menu) ? 1 : 0);
+  if (row >= rows)
+    row = -1;
+  if (row != popup.hover) {
+    popup.hover = row;
+    popup.hover_ms = now_ms();
+    if (row < 0) {
+      submenu_close();
+    } else {
+      const MangobarMenuNode *n = menu_visible_node(popup.menu, row);
+      if (!n || n->child_count == 0)
+        submenu_close();
+    }
+    if (popup.configured)
+      draw_menu_popup();
+  }
+}
+
+// Auto-open a submenu after hovering ~300ms
+static void menu_hover_tick(void) {
+  if (!popup.open || !popup_pointer || pointer_on_sub || popup.hover < 0)
+    return;
+  const MangobarMenuNode *n = menu_visible_node(popup.menu, popup.hover);
+  if (popup.sub_open && popup.sub_node != n)
+    submenu_close();
+  if (!n || n->child_count == 0)
+    return;
+  if (popup.sub_open && popup.sub_node == n)
+    return;
+  if (now_ms() - popup.hover_ms < 300)
+    return;
+  submenu_open(n);
+}
+
+static void menu_activate_row(int row) {
+  const MangobarMenuNode *n = menu_visible_node(popup.menu, row);
+  if (!n)
+    return;
+  if (n->child_count > 0) {
+    submenu_open(n);
+    return;
+  }
+  if (!n->enabled)
+    return;
+  menu_activate(popup.menu, n, (uint32_t)now_ms());
+  menu_close();
+}
+
+// Build a Pango font from the fcft font string
+static PangoFontDescription *build_menu_font(void) {
+  PangoFontDescription *fd = pango_font_description_new();
+  char fam[256] = "Sans";
+  int size = 12;
+  bool bold = false;
+  const char *p = g_style_sheet.font_family[0] ? g_style_sheet.font_family
+                                               : g_cfg.font;
+  const char *colon = strchr(p, ':');
+  if (colon) {
+    size_t n = (size_t)(colon - p);
+    if (n > 0 && n < sizeof(fam)) {
+      memcpy(fam, p, n);
+      fam[n] = '\0';
+    }
+    p = colon;
+  } else {
+    snprintf(fam, sizeof(fam), "%s", p);
+    p = p + strlen(p);
+  }
+  while (*p) {
+    if (*p == ':')
+      p++;
+    const char *eq = strchr(p, ':');
+    size_t tlen = eq ? (size_t)(eq - p) : strlen(p);
+    char tok[64];
+    size_t tl = tlen < 63 ? tlen : 63;
+    memcpy(tok, p, tl);
+    tok[tl] = '\0';
+    p += tlen;
+    char *eqc = strchr(tok, '=');
+    if (eqc) {
+      *eqc = '\0';
+      const char *k = tok;
+      const char *v = eqc + 1;
+      if (strcmp(k, "size") == 0)
+        size = atoi(v);
+      else if (strcmp(k, "style") == 0 || strcmp(k, "weight") == 0) {
+        if (strcasestr(v, "bold"))
+          bold = true;
+      }
+    }
+  }
+  if (g_style_sheet.menu_font_size > 0)
+    size = g_style_sheet.menu_font_size;
+  if (g_style_sheet.font_weight[0] &&
+      strcasestr(g_style_sheet.font_weight, "bold"))
+    bold = true;
+  if (size <= 0)
+    size = 12;
+  pango_font_description_set_family(fd, fam);
+  pango_font_description_set_size(fd, size * PANGO_SCALE);
+  if (bold)
+    pango_font_description_set_weight(fd, PANGO_WEIGHT_BOLD);
+  return fd;
+}
+
+static void menu_draw_text(cairo_t *cr, const char *text, double x, double y,
+                           double r, double g, double b) {
+  PangoLayout *layout = pango_cairo_create_layout(cr);
+  PangoFontDescription *fd = build_menu_font();
+  pango_layout_set_font_description(layout, fd);
+  pango_font_description_free(fd);
+  pango_layout_set_text(layout, text, -1);
+  cairo_set_source_rgb(cr, r, g, b);
+  cairo_move_to(cr, x, y);
+  pango_cairo_show_layout(cr, layout);
+  g_object_unref(layout);
+}
+
+static void argb_to_rgb(uint32_t c, double *r, double *g, double *b) {
+  // Colors are stored as 0xRRGGBBAA (see hex_to_pixman)
+  *r = ((c >> 24) & 0xff) / 255.0;
+  *g = ((c >> 16) & 0xff) / 255.0;
+  *b = ((c >> 8) & 0xff) / 255.0;
+}
+
+static void draw_menu_popup(void) {
+  if (!popup.open || !popup.configured)
+    return;
+  int fd = allocate_shm_file(popup.bufsize);
+  if (fd < 0)
+    return;
+  uint32_t *data = mmap(NULL, popup.bufsize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        fd, 0);
+  if (data == MAP_FAILED) {
+    close(fd);
+    return;
+  }
+  struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, popup.bufsize);
+  struct wl_buffer *buf = wl_shm_pool_create_buffer(
+      pool, 0, popup.width, popup.height, popup.stride,
+      WL_SHM_FORMAT_ARGB8888);
+  wl_buffer_add_listener(buf, &wl_buffer_listener, NULL);
+  wl_shm_pool_destroy(pool);
+  close(fd);
+
+  cairo_surface_t *cs = cairo_image_surface_create_for_data(
+      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.width, popup.height,
+      popup.stride);
+  cairo_t *cr = cairo_create(cs);
+  cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+  double rad = g_style_sheet.menu_radius > 0 ? g_style_sheet.menu_radius : 10;
+  double bg_r, bg_g, bg_b, bd_r, bd_g, bd_b;
+  double it_r, it_g, it_b, hov_r, hov_g, hov_b;
+  double hovbg_r, hovbg_g, hovbg_b;
+  if (g_style_sheet.menu.background_set)
+    argb_to_rgb(g_style_sheet.menu.background, &bg_r, &bg_g, &bg_b);
+  else {
+    bg_r = 0.125;
+    bg_g = 0.106;
+    bg_b = 0.078;
+  }
+  if (g_style_sheet.menu.border_color_set)
+    argb_to_rgb(g_style_sheet.menu.border_color, &bd_r, &bd_g, &bd_b);
+  else {
+    bd_r = 0.27;
+    bd_g = 0.27;
+    bd_b = 0.27;
+  }
+  if (g_style_sheet.menuitem.color_set)
+    argb_to_rgb(g_style_sheet.menuitem.color, &it_r, &it_g, &it_b);
+  else {
+    it_r = 0.78;
+    it_g = 0.54;
+    it_b = 0.58;
+  }
+  if (g_style_sheet.menuitem_hover.color_set)
+    argb_to_rgb(g_style_sheet.menuitem_hover.color, &hov_r, &hov_g, &hov_b);
+  else {
+    hov_r = it_r;
+    hov_g = it_g;
+    hov_b = it_b;
+  }
+  if (g_style_sheet.menuitem_hover.background_set)
+    argb_to_rgb(g_style_sheet.menuitem_hover.background, &hovbg_r, &hovbg_g,
+                &hovbg_b);
+  else {
+    hovbg_r = 0.23;
+    hovbg_g = 0.17;
+    hovbg_b = 0.16;
+  }
+  // Background (rounded)
+  cairo_rounded_rect(cr, 0, 0, popup.width, popup.height, rad);
+  cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
+  cairo_fill(cr);
+  // Border (rounded stroke)
+  cairo_rounded_rect(cr, 0.5, 0.5, popup.width - 1, popup.height - 1, rad);
+  cairo_set_source_rgb(cr, bd_r, bd_g, bd_b);
+  cairo_set_line_width(cr, 1.0);
+  cairo_stroke(cr);
+
+  double y = MENU_PAD_V;
+  int vis = menu_visible_count(popup.menu);
+  bool in_sub = menu_in_submenu(popup.menu);
+
+  if (in_sub) {
+    bool hov = popup.hover == 0;
+    if (hov) {
+      cairo_rounded_rect(cr, 1, y, popup.width - 2, popup.item_h, rad - 2);
+      cairo_set_source_rgb(cr, hovbg_r, hovbg_g, hovbg_b);
+      cairo_fill(cr);
+    }
+    menu_draw_text(cr, "← 返回", MENU_PAD_H, y + 2, hov ? hov_r : it_r,
+                   hov ? hov_g : it_g, hov ? hov_b : it_b);
+    y += popup.item_h;
+  }
+  for (int i = 0; i < vis; i++) {
+    const MangobarMenuNode *n = menu_visible_node(popup.menu, i);
+    int row = in_sub ? i + 1 : i;
+    bool hov = popup.hover == row;
+    if (hov) {
+      cairo_rounded_rect(cr, 1, y, popup.width - 2, popup.item_h, rad - 2);
+      cairo_set_source_rgb(cr, hovbg_r, hovbg_g, hovbg_b);
+      cairo_fill(cr);
+    }
+    const char *label = n->label ? n->label : "";
+    if (n->enabled)
+      menu_draw_text(cr, label, MENU_PAD_H, y + 2, hov ? hov_r : it_r,
+                     hov ? hov_g : it_g, hov ? hov_b : it_b);
+    else
+      menu_draw_text(cr, label, MENU_PAD_H, y + 2, 0.5, 0.5, 0.5);
+    if (n->child_count > 0) {
+      PangoLayout *l = pango_cairo_create_layout(cr);
+      PangoFontDescription *fd = build_menu_font();
+      pango_layout_set_font_description(l, fd);
+      pango_font_description_free(fd);
+      pango_layout_set_text(l, label, -1);
+      int tw, th;
+      pango_layout_get_pixel_size(l, &tw, &th);
+      g_object_unref(l);
+      menu_draw_text(cr, "▶", MENU_PAD_H + tw + 8, y + 2, it_r, it_g, it_b);
+    }
+    y += popup.item_h;
+  }
+
+  cairo_destroy(cr);
+  cairo_surface_destroy(cs);
+  munmap(data, popup.bufsize);
+
+  wl_surface_attach(popup.surface, buf, 0, 0);
+  wl_surface_damage_buffer(popup.surface, 0, 0, popup.width, popup.height);
+  wl_surface_commit(popup.surface);
+}
+
+static void popup_layer_configure(void *data,
+                                  struct zwlr_layer_surface_v1 *surface,
+                                  uint32_t serial, uint32_t w, uint32_t h) {
+  zwlr_layer_surface_v1_ack_configure(surface, serial);
+  popup.width = w * g_cfg.buffer_scale;
+  popup.height = h * g_cfg.buffer_scale;
+  popup.stride = popup.width * 4;
+  popup.bufsize = popup.stride * popup.height;
+  popup.configured = true;
+  draw_menu_popup();
+}
+
+static void popup_layer_closed(void *data,
+                               struct zwlr_layer_surface_v1 *surface) {
+  menu_close();
+}
+
+static const struct zwlr_layer_surface_v1_listener popup_layer_listener = {
+    .configure = popup_layer_configure,
+    .closed = popup_layer_closed,
+};
+
+// Measure text width with pango (matches menu drawing)
+static int pango_text_width(const char *text) {
+  if (!text || !*text)
+    return 0;
+  cairo_surface_t *cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+  cairo_t *cr = cairo_create(cs);
+  PangoLayout *l = pango_cairo_create_layout(cr);
+  PangoFontDescription *fd = build_menu_font();
+  pango_layout_set_font_description(l, fd);
+  pango_font_description_free(fd);
+  pango_layout_set_text(l, text, -1);
+  int w, h;
+  pango_layout_get_pixel_size(l, &w, &h);
+  g_object_unref(l);
+  cairo_destroy(cr);
+  cairo_surface_destroy(cs);
+  return w;
+}
+
+// Called after GetLayout: compute size, clamp position, redraw
+static void menu_layout_cb(void *data) {
+  if (!popup.open || !popup.menu)
+    return;
+  int vis = menu_visible_count(popup.menu);
+  if (vis <= 0) {
+    // Menu not ready; refresh and close.
+    if (tray)
+      tray_refresh(tray);
+    menu_close();
+    return;
+  }
+  int item_h = font->ascent + font->descent + 6;
+  if (item_h < 20)
+    item_h = 20;
+  popup.item_h = item_h;
+  uint32_t w = MENU_PAD_H * 2 + 8;
+  for (int i = 0; i < vis; i++) {
+    const MangobarMenuNode *n = menu_visible_node(popup.menu, i);
+    if (n->label) {
+      int tw = pango_text_width(n->label);
+      int need = tw + MENU_PAD_H * 2 + (n->child_count > 0 ? 20 : 8);
+      if (need > (int)w)
+        w = (uint32_t)need;
+    }
+  }
+  int rows = vis + (menu_in_submenu(popup.menu) ? 1 : 0);
+  uint32_t h = (uint32_t)rows * item_h + MENU_PAD_V * 2;
+
+  // Menu hugs below the systray (no overlap), right-aligned to the click
+  int ml = popup.lx - (int)w;
+  // Position below the systray with the desired gap.
+  int mt = 10;
+  if (mt < 0)
+    mt = 0;
+  if (ml < 0)
+    ml = 0;
+  if (popup.out_w > 0 && ml + (int)w > popup.out_w)
+    ml = popup.out_w - (int)w;
+  if (mt < 0)
+    mt = 0;
+  if (popup.out_h > 0 && mt + (int)h > popup.out_h)
+    mt = popup.out_h - (int)h;
+  zwlr_layer_surface_v1_set_margin(popup.layer_surface, mt, 0, 0, ml);
+  zwlr_layer_surface_v1_set_size(popup.layer_surface, w, h);
+  wl_surface_commit(popup.surface);
+  popup.margin_left = ml;
+  popup.margin_top = mt;
+  IPC_LOG("[menu] layout bar_h=%d mt=%d ml=%d w=%u h=%u\n", popup.bar_h, mt,
+          ml, w, h);
+}
+
+// ---------- Submenu (side popup) ----------
+static void submenu_destroy_surface(void) {
+  if (popup.sub_layer_surface)
+    zwlr_layer_surface_v1_destroy(popup.sub_layer_surface);
+  if (popup.sub_surface)
+    wl_surface_destroy(popup.sub_surface);
+  popup.sub_layer_surface = NULL;
+  popup.sub_surface = NULL;
+  popup.sub_open = false;
+  popup.sub_configured = false;
+  popup.sub_node = NULL;
+  popup.sub_hover = -1;
+}
+
+static void submenu_close(void) {
+  if (!popup.open || !popup.sub_open)
+    return;
+  submenu_destroy_surface();
+}
+
+static void draw_submenu(void) {
+  if (!popup.sub_open || !popup.sub_configured || !popup.sub_node)
+    return;
+  int fd = allocate_shm_file(popup.sub_bufsize);
+  if (fd < 0)
+    return;
+  uint32_t *data = mmap(NULL, popup.sub_bufsize, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, fd, 0);
+  if (data == MAP_FAILED) {
+    close(fd);
+    return;
+  }
+  struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, popup.sub_bufsize);
+  struct wl_buffer *buf = wl_shm_pool_create_buffer(
+      pool, 0, popup.sub_width, popup.sub_height, popup.sub_stride,
+      WL_SHM_FORMAT_ARGB8888);
+  wl_buffer_add_listener(buf, &wl_buffer_listener, NULL);
+  wl_shm_pool_destroy(pool);
+  close(fd);
+
+  cairo_surface_t *cs = cairo_image_surface_create_for_data(
+      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.sub_width,
+      popup.sub_height, popup.sub_stride);
+  cairo_t *cr = cairo_create(cs);
+  cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+  double rad = g_style_sheet.menu_radius > 0 ? g_style_sheet.menu_radius : 10;
+  double bg_r, bg_g, bg_b, bd_r, bd_g, bd_b;
+  double it_r, it_g, it_b, hov_r, hov_g, hov_b, hovbg_r, hovbg_g, hovbg_b;
+  if (g_style_sheet.menu.background_set)
+    argb_to_rgb(g_style_sheet.menu.background, &bg_r, &bg_g, &bg_b);
+  else {
+    bg_r = 0.125;
+    bg_g = 0.106;
+    bg_b = 0.078;
+  }
+  if (g_style_sheet.menu.border_color_set)
+    argb_to_rgb(g_style_sheet.menu.border_color, &bd_r, &bd_g, &bd_b);
+  else {
+    bd_r = 0.27;
+    bd_g = 0.27;
+    bd_b = 0.27;
+  }
+  if (g_style_sheet.menuitem.color_set)
+    argb_to_rgb(g_style_sheet.menuitem.color, &it_r, &it_g, &it_b);
+  else {
+    it_r = 0.78;
+    it_g = 0.54;
+    it_b = 0.58;
+  }
+  if (g_style_sheet.menuitem_hover.color_set)
+    argb_to_rgb(g_style_sheet.menuitem_hover.color, &hov_r, &hov_g, &hov_b);
+  else {
+    hov_r = it_r;
+    hov_g = it_g;
+    hov_b = it_b;
+  }
+  if (g_style_sheet.menuitem_hover.background_set)
+    argb_to_rgb(g_style_sheet.menuitem_hover.background, &hovbg_r, &hovbg_g,
+                &hovbg_b);
+  else {
+    hovbg_r = 0.23;
+    hovbg_g = 0.17;
+    hovbg_b = 0.16;
+  }
+
+  cairo_rounded_rect(cr, 0, 0, popup.sub_width, popup.sub_height, rad);
+  cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
+  cairo_fill(cr);
+  cairo_rounded_rect(cr, 0.5, 0.5, popup.sub_width - 1, popup.sub_height - 1,
+                     rad);
+  cairo_set_source_rgb(cr, bd_r, bd_g, bd_b);
+  cairo_set_line_width(cr, 1.0);
+  cairo_stroke(cr);
+
+  int vis = menu_node_visible_count(popup.sub_node);
+  double y = MENU_PAD_V;
+  for (int i = 0; i < vis; i++) {
+    const MangobarMenuNode *n = menu_node_visible_node(popup.sub_node, i);
+    bool hov = popup.sub_hover == i;
+    if (hov) {
+      cairo_rounded_rect(cr, 1, y, popup.sub_width - 2, popup.item_h, rad - 2);
+      cairo_set_source_rgb(cr, hovbg_r, hovbg_g, hovbg_b);
+      cairo_fill(cr);
+    }
+    const char *label = n ? n->label : "";
+    if (n && n->enabled)
+      menu_draw_text(cr, label, MENU_PAD_H, y + 2, hov ? hov_r : it_r,
+                     hov ? hov_g : it_g, hov ? hov_b : it_b);
+    else
+      menu_draw_text(cr, label, MENU_PAD_H, y + 2, 0.5, 0.5, 0.5);
+    y += popup.item_h;
+  }
+
+  cairo_destroy(cr);
+  cairo_surface_destroy(cs);
+  munmap(data, popup.sub_bufsize);
+
+  wl_surface_attach(popup.sub_surface, buf, 0, 0);
+  wl_surface_damage_buffer(popup.sub_surface, 0, 0, popup.sub_width,
+                           popup.sub_height);
+  wl_surface_commit(popup.sub_surface);
+}
+
+static void submenu_layer_configure(void *data,
+                                    struct zwlr_layer_surface_v1 *surface,
+                                    uint32_t serial, uint32_t w, uint32_t h) {
+  zwlr_layer_surface_v1_ack_configure(surface, serial);
+  popup.sub_width = w * g_cfg.buffer_scale;
+  popup.sub_height = h * g_cfg.buffer_scale;
+  popup.sub_stride = popup.sub_width * 4;
+  popup.sub_bufsize = popup.sub_stride * popup.sub_height;
+  popup.sub_configured = true;
+  draw_submenu();
+}
+
+static void submenu_layer_closed(void *data,
+                                 struct zwlr_layer_surface_v1 *surface) {
+  submenu_destroy_surface();
+}
+
+static const struct zwlr_layer_surface_v1_listener submenu_layer_listener = {
+    .configure = submenu_layer_configure,
+    .closed = submenu_layer_closed,
+};
+
+static void submenu_open(const MangobarMenuNode *node) {
+  if (!popup.open || !node || node->child_count == 0)
+    return;
+  if (popup.sub_open && popup.sub_node == node)
+    return;
+  submenu_destroy_surface();
+
+  int vis = menu_node_visible_count(node);
+  if (vis <= 0)
+    return;
+  uint32_t w = MENU_PAD_H * 2 + 8;
+  for (int i = 0; i < vis; i++) {
+    const MangobarMenuNode *n = menu_node_visible_node(node, i);
+    if (n && n->label) {
+      int tw = pango_text_width(n->label);
+      int need = tw + MENU_PAD_H * 2 + 8;
+      if (need > (int)w)
+        w = (uint32_t)need;
+    }
+  }
+  uint32_t h = (uint32_t)vis * popup.item_h + MENU_PAD_V * 2;
+
+  int ml = popup.margin_left + (int)popup.width + 4;
+  int mt = popup.margin_top + MENU_PAD_V +
+           (popup.hover >= 0 ? popup.hover : 0) * popup.item_h;
+  if (popup.out_w > 0 && ml + (int)w > popup.out_w) {
+    ml = popup.margin_left - (int)w - 4;
+    if (ml < 0)
+      ml = 0;
+  }
+  if (popup.out_h > 0 && mt + (int)h > popup.out_h) {
+    mt = popup.out_h - (int)h - 8;
+    if (mt < 0)
+      mt = 0;
+  }
+
+  popup.sub_node = node;
+  popup.sub_hover = -1;
+  popup.sub_surface = wl_compositor_create_surface(compositor);
+  popup.sub_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+      layer_shell, popup.sub_surface, popup.output,
+      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "mangobar-menu-sub");
+  zwlr_layer_surface_v1_add_listener(popup.sub_layer_surface,
+                                     &submenu_layer_listener, NULL);
+  zwlr_layer_surface_v1_set_anchor(
+      popup.sub_layer_surface,
+      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+  zwlr_layer_surface_v1_set_margin(popup.sub_layer_surface, mt, 0, 0, ml);
+  zwlr_layer_surface_v1_set_size(popup.sub_layer_surface, w, h);
+  zwlr_layer_surface_v1_set_exclusive_zone(popup.sub_layer_surface, 0);
+  wl_surface_commit(popup.sub_surface);
+  popup.sub_open = true;
+  popup.sub_configured = false;
+}
+
+// ---------- Fullscreen transparent grab layer ----------
+static void grab_layer_configure(void *data,
+                                 struct zwlr_layer_surface_v1 *surface,
+                                 uint32_t serial, uint32_t w, uint32_t h) {
+  zwlr_layer_surface_v1_ack_configure(surface, serial);
+  if (popup.grab_width == w && popup.grab_height == h && popup.grab_buffer)
+    return;
+  if (popup.grab_buffer) {
+    wl_buffer_destroy(popup.grab_buffer);
+    popup.grab_buffer = NULL;
+  }
+  popup.grab_width = w;
+  popup.grab_height = h;
+  popup.grab_buffer = create_transparent_buffer(
+      w, h, &popup.grab_stride, &popup.grab_bufsize);
+  if (popup.grab_buffer) {
+    wl_surface_attach(popup.grab_surface, popup.grab_buffer, 0, 0);
+    wl_surface_commit(popup.grab_surface);
+  }
+}
+
+static void grab_layer_closed(void *data,
+                              struct zwlr_layer_surface_v1 *surface) {
+  if (popup.open)
+    menu_close();
+}
+
+static const struct zwlr_layer_surface_v1_listener grab_layer_listener = {
+    .configure = grab_layer_configure,
+    .closed = grab_layer_closed,
+};
+
+static void grab_create(Bar *bar) {
+  popup.grab_surface = wl_compositor_create_surface(compositor);
+  popup.grab_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+      layer_shell, popup.grab_surface, bar->wl_output,
+      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "mangobar-menu-grab");
+  zwlr_layer_surface_v1_add_listener(popup.grab_layer_surface,
+                                     &grab_layer_listener, NULL);
+  zwlr_layer_surface_v1_set_anchor(
+      popup.grab_layer_surface,
+      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+          ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
+          ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
+  zwlr_layer_surface_v1_set_exclusive_zone(popup.grab_layer_surface, 0);
+  zwlr_layer_surface_v1_set_keyboard_interactivity(
+      popup.grab_layer_surface,
+      ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+  wl_surface_commit(popup.grab_surface);
+}
+
+static void grab_destroy(void) {
+  if (popup.grab_layer_surface)
+    zwlr_layer_surface_v1_destroy(popup.grab_layer_surface);
+  if (popup.grab_surface)
+    wl_surface_destroy(popup.grab_surface);
+  if (popup.grab_buffer)
+    wl_buffer_destroy(popup.grab_buffer);
+  popup.grab_layer_surface = NULL;
+  popup.grab_surface = NULL;
+  popup.grab_buffer = NULL;
+  popup.grab_width = popup.grab_height = 0;
+  popup.grab_stride = popup.grab_bufsize = 0;
+}
+
+static void menu_open(Bar *bar, MangobarTrayItem *item, double lx, double ly) {
+  menu_close();
+  const char *svc = tray_item_service(item);
+  const char *mp = tray_item_menu_path(item);
+  if (!svc || !mp || !*mp)
+    return;
+  sd_bus *bus = (sd_bus *)tray_get_bus(tray);
+  if (!bus)
+    return;
+  popup.menu = menu_init(bus, svc, mp, menu_layout_cb, NULL);
+  if (!popup.menu)
+    return;
+  popup.output = bar->wl_output;
+  // Create the grab layer first (below the menu) to catch outside clicks
+  grab_create(bar);
+  popup.surface = wl_compositor_create_surface(compositor);
+  popup.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+      layer_shell, popup.surface, popup.output, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+      "mangobar-menu");
+  zwlr_layer_surface_v1_add_listener(popup.layer_surface, &popup_layer_listener,
+                                     NULL);
+  zwlr_layer_surface_v1_set_anchor(
+      popup.layer_surface, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                               ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+  // Record position / output size for layout clamping
+  popup.lx = (int)lx;
+  popup.ly = (int)ly;
+  popup.bar_h =
+      bar->height / (g_cfg.buffer_scale > 0 ? g_cfg.buffer_scale : 1);
+  popup.out_w = bar->out_w;
+  popup.out_h = bar->out_h;
+  IPC_LOG("[menu] open bar_height=%u bar_h=%d lx=%d ly=%d out=%dx%d\n",
+          bar->height, popup.bar_h, popup.lx, popup.ly, popup.out_w,
+          popup.out_h);
+  // Initial position: below the systray, no overlap
+  int top = 10;
+  int left = popup.lx > 10 ? popup.lx - 10 : 0;
+  zwlr_layer_surface_v1_set_margin(popup.layer_surface, top, 0, 0, left);
+  zwlr_layer_surface_v1_set_size(popup.layer_surface, 10, 10);
+  zwlr_layer_surface_v1_set_exclusive_zone(popup.layer_surface, 0);
+  wl_surface_commit(popup.surface);
+  popup.open = true;
+  popup.hover = -1;
+  popup.configured = false;
+  popup.item = item;
+  menu_refresh(popup.menu);
+}
+
+// ---------- Pointer input ----------
+static void setup_cursor() {
+  if (cursor_surface || !compositor)
+    return;
+  cursor_surface = wl_compositor_create_surface(compositor);
+  const char *theme_name = getenv("XCURSOR_THEME");
+  int size = 24;
+  const char *es = getenv("XCURSOR_SIZE");
+  if (es && *es) {
+    int v = atoi(es);
+    if (v > 0)
+      size = v;
+  }
+  cursor_theme = wl_cursor_theme_load(theme_name, size, shm);
+}
+
+static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
+                             uint32_t serial, struct wl_surface *surface,
+                             wl_fixed_t surface_x, wl_fixed_t surface_y) {
+  pointer_x = wl_fixed_to_double(surface_x);
+  pointer_y = wl_fixed_to_double(surface_y);
+  if (popup.open) {
+    if (surface == popup.surface) {
+      popup_pointer = true;
+      pointer_on_sub = false;
+      popup.outside_since = 0;
+      update_menu_hover(pointer_y);
+    } else if (popup.sub_open && surface == popup.sub_surface) {
+      popup_pointer = true;
+      pointer_on_sub = true;
+      popup.outside_since = 0;
+      int row = popup.item_h > 0 ? (int)(pointer_y / popup.item_h) : -1;
+      int vis = menu_node_visible_count(popup.sub_node);
+      if (row >= vis)
+        row = -1;
+      if (row != popup.sub_hover) {
+        popup.sub_hover = row;
+        draw_submenu();
+      }
+    } else if (popup.grab_surface && surface == popup.grab_surface) {
+      // Grab layer: keep the menu open; button handler closes it
+      popup_pointer = false;
+      pointer_on_sub = false;
+      popup.outside_since = 0;
+      // Grab coords match the bar (same output origin) for tray hit-testing
+      Bar *gb;
+      wl_list_for_each(gb, &bar_list, link)
+          if (gb->wl_output == popup.output) {
+            pointer_bar = gb;
+            break;
+          }
+    } else {
+      // Moving to the bar keeps it open; other windows count as outside
+      bool is_bar = false;
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) if (b->wl_surface == surface) {
+        is_bar = true;
+        break;
+      }
+      if (is_bar) {
+        popup_pointer = false;
+        pointer_on_sub = false;
+        popup.outside_since = 0;
+      } else {
+        menu_close();
+      }
+    }
+  } else {
+    popup_pointer = false;
+    pointer_on_sub = false;
+  }
+  Bar *b;
+  wl_list_for_each(b, &bar_list, link) if (b->wl_surface == surface) {
+    pointer_bar = b;
+    break;
+  }
+  if (cursor_theme) {
+    struct wl_cursor *cur = wl_cursor_theme_get_cursor(cursor_theme, "default");
+    if (cur) {
+      struct wl_cursor_image *img = cur->images[0];
+      wl_surface_attach(cursor_surface, wl_cursor_image_get_buffer(img), 0, 0);
+      wl_pointer_set_cursor(pointer, serial, cursor_surface, img->hotspot_x,
+                            img->hotspot_y);
+      wl_surface_damage_buffer(cursor_surface, 0, 0, INT32_MAX, INT32_MAX);
+      wl_surface_commit(cursor_surface);
+    }
+  }
+}
+
+static void wl_pointer_leave(void *data, struct wl_pointer *wl_pointer,
+                             uint32_t serial, struct wl_surface *surface) {
+  if (popup.open) {
+    // Pointer left our surfaces; close after the outside threshold.
+    popup.outside_since = now_ms();
+    popup_pointer = false;
+    pointer_on_sub = false;
+  }
+  pointer_bar = NULL;
+}
+
+static void wl_pointer_motion(void *data, struct wl_pointer *wl_pointer,
+                              uint32_t time, wl_fixed_t surface_x,
+                              wl_fixed_t surface_y) {
+  pointer_x = wl_fixed_to_double(surface_x);
+  pointer_y = wl_fixed_to_double(surface_y);
+  if (popup_pointer && pointer_on_sub) {
+    int row = popup.item_h > 0 ? (int)(pointer_y / popup.item_h) : -1;
+    int vis = menu_node_visible_count(popup.sub_node);
+    if (row >= vis)
+      row = -1;
+    if (row != popup.sub_hover) {
+      popup.sub_hover = row;
+      draw_submenu();
+    }
+  } else if (popup_pointer) {
+    update_menu_hover(pointer_y);
+  }
+}
+
+static void wl_pointer_button(void *data, struct wl_pointer *wl_pointer,
+                              uint32_t serial, uint32_t time, uint32_t button,
+                              uint32_t state) {
+  if (state != WL_POINTER_BUTTON_STATE_PRESSED)
+    return;
+  IPC_LOG("[pointer] button=%u x=%.1f y=%.1f bar=%s popup=%d\n", button,
+          pointer_x, pointer_y, pointer_bar ? pointer_bar->name : "-",
+          popup.open);
+  if (popup.open) {
+    if (popup_pointer && pointer_on_sub && popup.sub_open) {
+      const MangobarMenuNode *n =
+          menu_node_visible_node(popup.sub_node, popup.sub_hover);
+      if (n && n->enabled) {
+        menu_activate(popup.menu, n, (uint32_t)now_ms());
+        menu_close();
+      }
+    } else if (popup_pointer) {
+      menu_activate_row(popup.hover);
+    } else {
+      menu_close();
+      // Right-click a tray item: close old menu, open the new one
+      if (pointer_bar && button == BTN_RIGHT)
+        tray_right_click(pointer_bar, pointer_x, pointer_y);
+    }
+    return;
+  }
+  if (pointer_bar)
+    dispatch_pointer_event(pointer_bar, pointer_x, pointer_y, button);
+}
+
+static void wl_pointer_axis(void *data, struct wl_pointer *wl_pointer,
+                            uint32_t time, uint32_t axis, wl_fixed_t value) {
+  if (axis < 2)
+    axis_value[axis] += value;
+}
+
+static void wl_pointer_axis_discrete(void *data, struct wl_pointer *wl_pointer,
+                                     uint32_t axis, int32_t discrete) {
+  // discrete sign is the scroll direction (positive = down/right)
+  if (axis < 2)
+    axis_steps[axis] += discrete;
+}
+
+static void wl_pointer_frame(void *data, struct wl_pointer *wl_pointer) {
+  if (!pointer_bar)
+    return;
+  for (int a = 0; a < 2; a++) {
+    int steps = axis_steps[a];
+    double v = wl_fixed_to_double(axis_value[a]);
+    int dir = 0; // -1=up/left, 1=down/right
+    if (steps > 0)
+      dir = 1;
+    else if (steps < 0)
+      dir = -1;
+    else if (v > 0)
+      dir = 1;
+    else if (v < 0)
+      dir = -1;
+    int n = steps != 0 ? abs(steps) : (int)(v / 15.0);
+    if (n < 0)
+      n = -n;
+    if (n > 4)
+      n = 4;
+    if (n <= 0 || dir == 0) {
+      axis_steps[a] = 0;
+      axis_value[a] = 0;
+      continue;
+    }
+    for (int i = 0; i < n; i++) {
+      uint32_t btn = (a == 0) ? (dir < 0 ? 4 : 5) : (dir < 0 ? 6 : 7);
+      dispatch_pointer_event(pointer_bar, pointer_x, pointer_y, btn);
+    }
+    axis_steps[a] = 0;
+    axis_value[a] = 0;
+  }
+}
+
+static void wl_pointer_axis_source(void *data, struct wl_pointer *wl_pointer,
+                                   uint32_t axis_source) {
+}
+
+static void wl_pointer_axis_stop(void *data, struct wl_pointer *wl_pointer,
+                                 uint32_t time, uint32_t axis) {
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = wl_pointer_enter,
+    .leave = wl_pointer_leave,
+    .motion = wl_pointer_motion,
+    .button = wl_pointer_button,
+    .axis = wl_pointer_axis,
+    .frame = wl_pointer_frame,
+    .axis_source = wl_pointer_axis_source,
+    .axis_stop = wl_pointer_axis_stop,
+    .axis_discrete = wl_pointer_axis_discrete,
+};
+
+// ---------- System info (CPU / mem / backlight / volume / time) ----------
 static int cpu_prev_total, cpu_prev_idle;
+
+static void update_brightness() {
+  static char dev[64];
+  static bool dev_init = false;
+  if (!dev_init) {
+    dev_init = true;
+    if (g_cfg.brightness_dev[0]) {
+      strncpy(dev, g_cfg.brightness_dev, sizeof(dev) - 1);
+      dev[sizeof(dev) - 1] = '\0';
+    } else {
+      DIR *d = opendir("/sys/class/backlight");
+      if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+          if (e->d_name[0] == '.')
+            continue;
+          char mb[512];
+          snprintf(mb, sizeof(mb), "/sys/class/backlight/%s/max_brightness",
+                   e->d_name);
+          struct stat st;
+          if (stat(mb, &st) == 0) {
+            strncpy(dev, e->d_name, sizeof(dev) - 1);
+            dev[sizeof(dev) - 1] = '\0';
+            break;
+          }
+        }
+        closedir(d);
+      }
+    }
+  }
+  if (!dev[0])
+    return;
+  char p[256], mp[256];
+  snprintf(p, sizeof(p), "/sys/class/backlight/%s/brightness", dev);
+  snprintf(mp, sizeof(mp), "/sys/class/backlight/%s/max_brightness", dev);
+  long b = 0, mb = 0;
+  FILE *f = fopen(p, "r");
+  if (f) {
+    if (fscanf(f, "%ld", &b) != 1)
+      b = 0;
+    fclose(f);
+  }
+  FILE *f2 = fopen(mp, "r");
+  if (f2) {
+    if (fscanf(f2, "%ld", &mb) != 1)
+      mb = 0;
+    fclose(f2);
+  }
+  int pct = mb ? (int)(b * 100 / mb) : 0;
+  Bar *bar;
+  wl_list_for_each(bar, &bar_list, link) bar->brightness_pct = pct;
+}
+
+// Network: active interface name + optional speed (sampled in speed mode)
+static void update_network(void) {
+  static char ifname[64];
+  static bool ifname_init;
+  if (!ifname_init) {
+    ifname_init = true;
+    FILE *f = fopen("/proc/net/route", "r");
+    if (f) {
+      char line[256];
+      fgets(line, sizeof(line), f); // header
+      while (fgets(line, sizeof(line), f)) {
+        char ifn[64], dst[16];
+        if (sscanf(line, "%31s %15s", ifn, dst) == 2 &&
+            strcmp(dst, "00000000") == 0) {
+          snprintf(ifname, sizeof(ifname), "%s", ifn);
+          break;
+        }
+      }
+      fclose(f);
+    }
+    if (!ifname[0]) {
+      DIR *d = opendir("/sys/class/net");
+      if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+          if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
+            continue;
+          char p[512], st[16] = "";
+          snprintf(p, sizeof(p), "/sys/class/net/%.240s/operstate",
+                   e->d_name);
+          FILE *sf = fopen(p, "r");
+          if (sf) {
+            if (fscanf(sf, "%15s", st) == 1 && strcmp(st, "up") == 0)
+              snprintf(ifname, sizeof(ifname), "%.63s", e->d_name);
+            fclose(sf);
+          }
+          if (ifname[0])
+            break;
+        }
+        closedir(d);
+      }
+    }
+  }
+
+  Bar *b;
+  bool need_speed = false;
+  wl_list_for_each(b, &bar_list, link) {
+    if (b->net_speed_mode)
+      need_speed = true;
+    snprintf(b->net_ifname, sizeof(b->net_ifname), "%s", ifname);
+  }
+  if (!need_speed || !ifname[0])
+    return;
+
+  // Read rx/tx bytes from /proc/net/dev and compute delta speed
+  static uint64_t prev_rx, prev_tx;
+  static char prev_ifname[64];
+  static double last_sec;
+  uint64_t rx = 0, tx = 0;
+  FILE *f = fopen("/proc/net/dev", "r");
+  if (f) {
+    char line[512];
+    fgets(line, sizeof(line), f);
+    fgets(line, sizeof(line), f);
+    while (fgets(line, sizeof(line), f)) {
+      char ifn[64];
+      unsigned long long r, t;
+      if (sscanf(line, "%31[^:]: %llu %*u %*u %*u %*u %*u %*u %*u %llu",
+                 ifn, &r, &t) == 3 && strcmp(ifn, ifname) == 0) {
+        rx = (uint64_t)r;
+        tx = (uint64_t)t;
+        break;
+      }
+    }
+    fclose(f);
+  }
+
+  double now = (double)now_ms() / 1000.0;
+  if (prev_ifname[0] && strcmp(prev_ifname, ifname) == 0 && last_sec > 0) {
+    double dt = now - last_sec;
+    if (dt >= 0.5) {
+      double rx_kbps = (double)(rx - prev_rx) / dt / 1024.0;
+      double tx_kbps = (double)(tx - prev_tx) / dt / 1024.0;
+      wl_list_for_each(b, &bar_list, link) {
+        b->net_rx_kbps = rx_kbps;
+        b->net_tx_kbps = tx_kbps;
+      }
+    }
+  }
+  prev_rx = rx;
+  prev_tx = tx;
+  snprintf(prev_ifname, sizeof(prev_ifname), "%s", ifname);
+  last_sec = now;
+}
+
+// PulseAudio sink callback: fill percent and mute state
+static void volume_sink_cb(pa_context *c, const pa_sink_info *i, int eol,
+                           void *userdata) {
+  int *vals = userdata;
+  (void)c;
+  (void)eol;
+  if (!i)
+    return;
+  pa_volume_t avg = pa_cvolume_avg(&i->volume);
+  int pct = (int)((avg * 100) / PA_VOLUME_NORM);
+  vals[0] = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+  vals[1] = i->mute ? 1 : 0;
+}
+
+// Read volume through the PulseAudio library (no shell commands)
+static void update_volume_pulse(int *pct, int *muted) {
+  int vals[2] = {-1, -1};
+  pa_mainloop *ml = pa_mainloop_new();
+  if (!ml)
+    return;
+  pa_mainloop_api *api = pa_mainloop_get_api(ml);
+  pa_context *ctx = pa_context_new(api, "mangobar");
+  if (ctx && pa_context_connect(ctx, NULL, PA_CONTEXT_NOFLAGS, NULL) >= 0) {
+    uint64_t start = now_ms();
+    for (;;) {
+      pa_context_state_t st = pa_context_get_state(ctx);
+      if (st == PA_CONTEXT_READY || st == PA_CONTEXT_FAILED ||
+          st == PA_CONTEXT_TERMINATED || now_ms() - start > 500)
+        break;
+      if (pa_mainloop_iterate(ml, 1, NULL) < 0)
+        break;
+    }
+    if (pa_context_get_state(ctx) == PA_CONTEXT_READY) {
+      pa_operation *op =
+          pa_context_get_sink_info_by_name(ctx, NULL, volume_sink_cb, vals);
+      if (op) {
+        start = now_ms();
+        while (pa_operation_get_state(op) == PA_OPERATION_RUNNING &&
+               now_ms() - start <= 500 && pa_mainloop_iterate(ml, 1, NULL) >= 0)
+          ;
+        pa_operation_unref(op);
+      }
+    }
+  }
+  if (ctx) {
+    pa_context_disconnect(ctx);
+    pa_context_unref(ctx);
+  }
+  pa_mainloop_free(ml);
+  *pct = vals[0];
+  *muted = vals[1];
+}
+
+static void update_volume() {
+  int pct = -1;
+  int muted = -1;
+  // PulseAudio library first; ALSA mixer as fallback
+  update_volume_pulse(&pct, &muted);
+  if (pct < 0) {
+    snd_mixer_t *handle = NULL;
+    if (snd_mixer_open(&handle, 0) == 0) {
+      if (snd_mixer_attach(handle, "default") == 0) {
+        snd_mixer_selem_register(handle, NULL, NULL);
+        snd_mixer_load(handle);
+        snd_mixer_selem_id_t *sid = NULL;
+        snd_mixer_selem_id_malloc(&sid);
+        if (sid) {
+          snd_mixer_selem_id_set_index(sid, g_cfg.volume_mix_index);
+          snd_mixer_selem_id_set_name(sid, g_cfg.volume_ctrl);
+          snd_mixer_elem_t *elem = snd_mixer_find_selem(handle, sid);
+          long minv = 0, maxv = 0;
+          if (elem && snd_mixer_selem_get_playback_volume_range(elem, &minv,
+                                                                &maxv) == 0 &&
+              maxv > minv) {
+            long vol = 0;
+            snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT,
+                                                &vol);
+            pct = (int)(100 * (vol - minv) / (maxv - minv));
+            if (pct < 0)
+              pct = 0;
+            if (pct > 100)
+              pct = 100;
+            int on = 0;
+            if (snd_mixer_selem_get_playback_switch(
+                    elem, SND_MIXER_SCHN_FRONT_LEFT, &on) == 0)
+              muted = on ? 0 : 1;
+          }
+          snd_mixer_selem_id_free(sid);
+        }
+      }
+      snd_mixer_close(handle);
+    }
+  }
+  Bar *bar;
+  wl_list_for_each(bar, &bar_list, link) {
+    bar->volume_pct = pct >= 0 ? pct : 0;
+    bar->volume_muted = muted == 1;
+  }
+}
+
 static void update_system_info() {
   FILE *f = fopen("/proc/stat", "r");
   if (f) {
@@ -730,6 +2714,9 @@ static void update_system_info() {
     Bar *b;
     wl_list_for_each(b, &bar_list, link) b->mem_pct = pct;
   }
+  update_brightness();
+  update_volume();
+  update_network();
   time_t now = time(NULL);
   struct tm *tm = localtime(&now);
   char ts[16];
@@ -738,19 +2725,81 @@ static void update_system_info() {
   wl_list_for_each(b, &bar_list, link) strcpy(b->time_str, ts);
 }
 
+// Run a custom module command and store its (trimmed) output.
+static bool run_custom_module(MangoCustomModule *cm) {
+  if (!cm->enabled || !cm->exec[0])
+    return false;
+  FILE *fp = popen(cm->exec, "r");
+  if (!fp) {
+    cm->last_run_ms = now_ms();
+    return false;
+  }
+  size_t n = fread(cm->output, 1, sizeof(cm->output) - 1, fp);
+  pclose(fp);
+  while (n > 0 && (cm->output[n - 1] == '\n' || cm->output[n - 1] == '\r' ||
+                   cm->output[n - 1] == ' ' || cm->output[n - 1] == '\t'))
+    n--;
+  cm->output[n] = '\0';
+  cm->last_run_ms = now_ms();
+  return true;
+}
+
+// Refresh due custom modules; returns true when any output changed.
+static bool update_custom_modules(void) {
+  bool changed = false;
+  uint64_t now = now_ms();
+  for (int i = 0; i < g_cfg.custom_count; i++) {
+    MangoCustomModule *cm = &g_cfg.customs[i];
+    if (!cm->enabled || !cm->exec[0])
+      continue;
+    uint64_t due = (uint64_t)(cm->interval > 0 ? cm->interval : 0) * 1000u;
+    if (cm->last_run_ms == 0 || (due > 0 && now - cm->last_run_ms >= due)) {
+      if (run_custom_module(cm))
+        changed = true;
+    }
+  }
+  return changed;
+}
+
+static void tray_set_dirty() {
+  Bar *b;
+  wl_list_for_each(b, &bar_list, link) b->redraw = true;
+}
+
 static void event_loop() {
   int wl_fd = wl_display_get_fd(display);
   while (running) {
-    fd_set rfds;
+    int tray_fd = tray ? tray_get_fd(tray) : -1;
+    fd_set rfds, wfds;
     FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
     FD_SET(wl_fd, &rfds);
     if (ipc_fd >= 0)
       FD_SET(ipc_fd, &rfds);
-    int maxfd = (ipc_fd > wl_fd) ? ipc_fd : wl_fd;
-    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+    if (tray_fd >= 0) {
+      // Always poll the bus fd for readability.
+      FD_SET(tray_fd, &rfds);
+      int tev = tray_get_events(tray);
+      if (tev & POLLOUT)
+        FD_SET(tray_fd, &wfds);
+    }
+    int maxfd = wl_fd;
+    if (ipc_fd > maxfd)
+      maxfd = ipc_fd;
+    if (tray_fd > maxfd)
+      maxfd = tray_fd;
+    // Short timeout while refreshing or the menu is open.
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    if (sys_refresh) {
+      tv.tv_sec = 0;
+      tv.tv_usec = 100000;
+    } else if (popup.open) {
+      tv.tv_sec = 0;
+      tv.tv_usec = 50000;
+    }
     wl_display_flush(display);
 
-    int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+    int ret = select(maxfd + 1, &rfds, &wfds, NULL, &tv);
     if (ret < 0) {
       if (errno == EINTR)
         continue;
@@ -764,20 +2813,71 @@ static void event_loop() {
       if (n > 0) {
         ipc_buf_len += n;
         ipc_buf[ipc_buf_len] = '\0';
+        IPC_LOG("[ipc] read n=%zd buflen=%zu\n", n, ipc_buf_len);
         process_ipc_data();
       } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
+        IPC_LOG("[ipc] read EOF/ERR n=%zd errno=%d, closing fd\n", n, errno);
         close(ipc_fd);
         ipc_fd = -1;
         ipc_buf_len = 0;
       }
     }
+    if (tray_fd >= 0 &&
+        (FD_ISSET(tray_fd, &rfds) || FD_ISSET(tray_fd, &wfds))) {
+      tray_dispatch(tray);
+    }
+    if (sys_refresh) {
+      sys_refresh = false;
+      update_system_info();
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    }
+    if (update_custom_modules()) {
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    }
     static time_t last_sec;
+    static time_t last_tray_refresh;
     time_t sec = time(NULL);
-    if (sec != last_sec) {
+    // Auto-reconnect the watch connection if it drops
+    static time_t last_reconnect;
+    if (ipc_fd < 0 && sec - last_reconnect >= 2) {
+      last_reconnect = sec;
+      IPC_LOG("[ipc] reconnecting...\n");
+      ipc_connect();
+      if (ipc_fd >= 0)
+        ipc_subscribe();
+    }
+    if (sec - last_sec >= g_cfg.sys_interval) {
       last_sec = sec;
       update_system_info();
       Bar *b;
       wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    }
+    // Periodically refresh the tray to rediscover items
+    if (tray && sec - last_tray_refresh >= 10) {
+      last_tray_refresh = sec;
+      tray_refresh(tray);
+    }
+    // Auto-open submenus on hover
+    menu_hover_tick();
+    // Retry opening the tray menu when its property wasn't ready
+    if (popup.pending_item && now_ms() - popup.pending_ms >= 300) {
+      MangobarTrayItem *pi = popup.pending_item;
+      Bar *pb = popup.pending_bar;
+      int px = popup.pending_x, py = popup.pending_y;
+      popup.pending_item = NULL;
+      popup.pending_bar = NULL;
+      if (pi && pb && tray_item_has_menu(pi))
+        menu_open(pb, pi, px, py);
+    }
+    static time_t last_tick;
+    if (sec - last_tick >= 5) {
+      last_tick = sec;
+      Bar *bt;
+      wl_list_for_each(bt, &bar_list, link)
+          IPC_LOG("[tick] %s ipc_fd=%d redraw=%d\n", bt->name, ipc_fd,
+                  bt->redraw);
     }
     Bar *b;
     wl_list_for_each(b, &bar_list, link) {
@@ -789,53 +2889,190 @@ static void event_loop() {
   }
 }
 
-static void init_colors() {
-  hex_to_pixman(active_fg_color_hex, &active_fg);
-  hex_to_pixman(active_bg_color_hex, &active_bg);
-  hex_to_pixman(occupied_fg_color_hex, &occupied_fg);
-  hex_to_pixman(occupied_bg_color_hex, &occupied_bg);
-  hex_to_pixman(inactive_fg_color_hex, &inactive_fg);
-  hex_to_pixman(inactive_bg_color_hex, &inactive_bg);
-  hex_to_pixman(urgent_fg_color_hex, &urgent_fg);
-  hex_to_pixman(urgent_bg_color_hex, &urgent_bg);
-  hex_to_pixman(empty_fg_color_hex, &empty_fg);
-  hex_to_pixman(empty_bg_color_hex, &empty_bg);
+// ---------- Style initialization ----------
+static void apply_css_resolved(ModuleStyle *ms, Style s) {
+  if (s.color_set)
+    hex_to_pixman(s.color, &ms->fg);
+  if (s.background_set)
+    hex_to_pixman(s.background, &ms->bg);
+  if (s.padding_left_set)
+    ms->pad_l = s.padding_left;
+  if (s.padding_right_set)
+    ms->pad_r = s.padding_right;
+  if (s.margin_left_set)
+    ms->margin_l = s.margin_left;
+  if (s.margin_right_set)
+    ms->margin_r = s.margin_right;
+  if (s.radius_set)
+    ms->radius = s.radius;
+  if (s.min_width_set)
+    ms->min_width = s.min_width;
+}
 
-  hex_to_pixman(layout_fg_color_hex, &layout_fg);
-  hex_to_pixman(layout_bg_color_hex, &layout_bg);
-  hex_to_pixman(title_fg_color_hex, &title_fg);
-  hex_to_pixman(title_bg_color_hex, &title_bg);
+static void apply_css(ModuleStyle *ms, const char *module, const char *state) {
+  apply_css_resolved(ms, style_resolve(&g_style_sheet, module, state));
+}
 
-  hex_to_pixman(cpu_fg_color_hex, &cpu_fg);
-  hex_to_pixman(cpu_bg_color_hex, &cpu_bg);
-  hex_to_pixman(mem_fg_color_hex, &mem_fg);
-  hex_to_pixman(mem_bg_color_hex, &mem_bg);
-  hex_to_pixman(clock_fg_color_hex, &clock_fg);
-  hex_to_pixman(clock_bg_color_hex, &clock_bg);
-  hex_to_pixman(keymode_fg_color_hex, &keymode_fg);
-  hex_to_pixman(keymode_bg_color_hex, &keymode_bg);
-  hex_to_pixman(keyboardlayout_fg_color_hex, &keyboardlayout_fg);
-  hex_to_pixman(keyboardlayout_bg_color_hex, &keyboardlayout_bg);
+static void init_styles() {
+  ModuleStyle *all[] = {&st_tags[0], &st_tags[1], &st_tags[2],
+                        &st_tags[3], &st_tags[4], &st_layout,
+                        &st_title,   &st_clock,   &st_clock_date, &st_cpu,
+                        &st_mem,     &st_brightness, &st_volume,
+                        &st_keymode, &st_keyboardlayout, &st_network, &st_overview,
+                        &st_separator, &st_tray, &st_bar, &st_bar_sel};
+  for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
+    all[i]->radius = g_cfg.radius_default;
+  for (int i = 0; i < MANGOBAR_MAX_CUSTOM; i++) {
+    st_custom[i].radius = g_cfg.radius_default;
+  }
+  for (int i = 0; i < 5; i++)
+    st_tags[i].center = true;
+  st_layout.center = true;
+  st_overview.center = true;
 
-  hex_to_pixman(overview_fg_color_hex, &overview_fg);
-  hex_to_pixman(overview_bg_color_hex, &overview_bg);
+  hex_to_pixman(active_fg_color_hex, &st_tags[0].fg);
+  hex_to_pixman(active_bg_color_hex, &st_tags[0].bg);
+  hex_to_pixman(occupied_fg_color_hex, &st_tags[1].fg);
+  hex_to_pixman(occupied_bg_color_hex, &st_tags[1].bg);
+  hex_to_pixman(urgent_fg_color_hex, &st_tags[2].fg);
+  hex_to_pixman(urgent_bg_color_hex, &st_tags[2].bg);
+  hex_to_pixman(empty_fg_color_hex, &st_tags[3].fg);
+  hex_to_pixman(empty_bg_color_hex, &st_tags[3].bg);
+  hex_to_pixman(inactive_fg_color_hex, &st_tags[4].fg);
+  hex_to_pixman(inactive_bg_color_hex, &st_tags[4].bg);
 
-  hex_to_pixman(separator_fg_color_hex, &separator_fg);
-  hex_to_pixman(separator_bg_color_hex, &separator_bg);
+  hex_to_pixman(layout_fg_color_hex, &st_layout.fg);
+  hex_to_pixman(layout_bg_color_hex, &st_layout.bg);
+  hex_to_pixman(title_fg_color_hex, &st_title.fg);
+  hex_to_pixman(title_bg_color_hex, &st_title.bg);
 
-  hex_to_pixman(middle_bg_color_hex, &middle_bg);
-  hex_to_pixman(middle_bg_sel_color_hex, &middle_bg_sel);
+  hex_to_pixman(cpu_fg_color_hex, &st_cpu.fg);
+  hex_to_pixman(cpu_bg_color_hex, &st_cpu.bg);
+  hex_to_pixman(mem_fg_color_hex, &st_mem.fg);
+  hex_to_pixman(mem_bg_color_hex, &st_mem.bg);
+  hex_to_pixman(brightness_fg_color_hex, &st_brightness.fg);
+  hex_to_pixman(brightness_bg_color_hex, &st_brightness.bg);
+  hex_to_pixman(volume_fg_color_hex, &st_volume.fg);
+  hex_to_pixman(volume_bg_color_hex, &st_volume.bg);
+  hex_to_pixman(clock_fg_color_hex, &st_clock.fg);
+  hex_to_pixman(clock_bg_color_hex, &st_clock.bg);
+  for (int i = 0; i < MANGOBAR_MAX_CUSTOM; i++) {
+    st_custom[i].fg = st_clock.fg;
+    st_custom[i].bg = st_clock.bg;
+  }
+  hex_to_pixman(clock_fg_color_hex, &st_clock_date.fg);
+  hex_to_pixman(clock_bg_color_hex, &st_clock_date.bg);
+  hex_to_pixman(keymode_fg_color_hex, &st_keymode.fg);
+  hex_to_pixman(keymode_bg_color_hex, &st_keymode.bg);
+  hex_to_pixman(keyboardlayout_fg_color_hex, &st_keyboardlayout.fg);
+  hex_to_pixman(keyboardlayout_bg_color_hex, &st_keyboardlayout.bg);
+  hex_to_pixman(clock_fg_color_hex, &st_network.fg);
+  hex_to_pixman(clock_bg_color_hex, &st_network.bg);
+
+  hex_to_pixman(tray_fg_color_hex, &st_tray.fg);
+  hex_to_pixman(tray_bg_color_hex, &st_tray.bg);
+
+  hex_to_pixman(overview_fg_color_hex, &st_overview.fg);
+  hex_to_pixman(overview_bg_color_hex, &st_overview.bg);
+
+  hex_to_pixman(separator_fg_color_hex, &st_separator.fg);
+  hex_to_pixman(separator_bg_color_hex, &st_separator.bg);
+
+  hex_to_pixman(middle_bg_color_hex, &st_bar.bg);
+  hex_to_pixman(middle_bg_color_hex, &st_bar.fg);
+  hex_to_pixman(middle_bg_sel_color_hex, &st_bar_sel.bg);
+  hex_to_pixman(middle_bg_sel_color_hex, &st_bar_sel.fg);
+
+  if (!g_style_sheet.loaded)
+    return;
+
+  apply_css(&st_tags[0], "tags", "active");
+  apply_css(&st_tags[1], "tags", "occupied");
+  apply_css(&st_tags[2], "tags", "urgent");
+  apply_css(&st_tags[3], "tags", "empty");
+  apply_css(&st_tags[4], "tags", "inactive");
+  apply_css(&st_layout, "layout", NULL);
+  apply_css(&st_title, "title", NULL);
+  apply_css(&st_clock, "clock", NULL);
+  apply_css(&st_clock_date, "clock", NULL);
+  apply_css(&st_clock_date, "clock", "date");
+  apply_css(&st_cpu, "cpu", NULL);
+  apply_css(&st_mem, "mem", NULL);
+  apply_css(&st_brightness, "brightness", NULL);
+  apply_css(&st_volume, "volume", NULL);
+  apply_css(&st_keymode, "keymode", NULL);
+  apply_css(&st_keyboardlayout, "keyboardlayout", NULL);
+  apply_css(&st_network, "network", NULL);
+  apply_css(&st_overview, "overview", NULL);
+  apply_css(&st_separator, "separator", NULL);
+  apply_css(&st_tray, "tray", NULL);
+  apply_css(&st_bar, "bar", NULL);
+  apply_css(&st_bar_sel, "bar", "sel");
+  for (int i = 0; i < g_cfg.custom_count; i++) {
+    if (!g_cfg.customs[i].enabled)
+      continue;
+    char sel[96];
+    snprintf(sel, sizeof(sel), "custom-%s", g_cfg.customs[i].name);
+    apply_css(&st_custom[i], sel, NULL);
+  }
+
+  // Top margin comes from the #bar CSS margin.
+  Style bar_s = style_resolve(&g_style_sheet, "bar", "");
+  bar_top = bar_s.margin_top_set ? bar_s.margin_top : 0;
+  bar_left = bar_s.margin_left_set ? (uint32_t)bar_s.margin_left : 0;
+  bar_right = bar_s.margin_right_set ? (uint32_t)bar_s.margin_right : 0;
+  bar_h = (uint32_t)g_cfg.bar_height;
 }
 
 int main() {
+  // Load external JSONC config.
+  mango_config_defaults();
+  char cfg_buf[512];
+  const char *cfg_file = mango_config_find_default(cfg_buf, sizeof(cfg_buf));
+  if (cfg_file && mango_config_load(cfg_file) == 0)
+    fprintf(stderr, "Loaded config: %s\n", cfg_file);
+
+  // Load CSS style sheet
+  style_sheet_init(&g_style_sheet);
+  char css_buf[512];
+  const char *css_file = NULL;
+  if (g_cfg.css_path[0]) {
+    css_file = g_cfg.css_path;
+  } else if (style_find_default_path(css_buf, sizeof(css_buf)) == 0) {
+    css_file = css_buf;
+  }
+  if (css_file) {
+    style_sheet_load(&g_style_sheet, css_file);
+  }
+
   fcft_init(FCFT_LOG_COLORIZE_AUTO, 0, FCFT_LOG_CLASS_ERROR);
-  font = fcft_from_name(1, (const char *[]){fontstr}, NULL);
+  font = fcft_from_name(1,
+                        (const char *[]){style_font_string(&g_style_sheet,
+                                                           g_cfg.font)},
+                        NULL);
+  if (!font) {
+    // Fall back to the config font if the CSS font fails
+    font = fcft_from_name(1, (const char *[]){g_cfg.font}, NULL);
+  }
   if (!font) {
     fprintf(stderr, "Failed to load fonts\n");
     return 1;
   }
 
-  init_colors();
+  init_styles();
+  // Ensure the bar is tall enough for the text (no vertical clipping)
+  int min_h = font->ascent + font->descent + 4;
+  if ((int)bar_h < min_h)
+    bar_h = (uint32_t)min_h;
+  // Keep tag/layout buttons circular.
+  for (int i = 0; i < 5; i++) {
+    st_tags[i].radius = -1;
+    st_tags[i].min_width =
+        (int)bar_h + st_tags[i].margin_l + st_tags[i].margin_r;
+  }
+  st_layout.radius = -1;
+  st_layout.min_width =
+      (int)bar_h + st_layout.margin_l + st_layout.margin_r;
   display = wl_display_connect(NULL);
   if (!display)
     return 1;
@@ -847,19 +3084,28 @@ int main() {
   if (!compositor || !shm || !layer_shell || !output_manager)
     return 1;
 
+  setup_cursor();
+
+  tray = tray_init(tray_set_dirty);
+
   ipc_connect();
   if (ipc_fd >= 0) {
     wl_display_roundtrip(display);
-    Bar *b;
-    wl_list_for_each(b, &bar_list, link) ipc_subscribe(b);
+    ipc_subscribe();
   }
   update_system_info();
+  update_custom_modules();
   signal(SIGTERM, exit);
   signal(SIGINT, exit);
+  signal(SIGCHLD, SIG_IGN); // reap action command children
 
   event_loop();
+  if (popup.open)
+    menu_close();
   if (ipc_fd >= 0)
     close(ipc_fd);
+  if (tray)
+    tray_destroy(tray);
   fcft_destroy(font);
   fcft_fini();
   wl_display_disconnect(display);

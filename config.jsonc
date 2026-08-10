@@ -1,0 +1,78 @@
+{
+    "layer": "top",
+    "height": 30,
+    "buffer-scale": 1,
+    "font": "Maple Mono NF CN:style=Bold:size=24",
+
+    "modules-left": [
+        "mango/workspaces",
+        "mango/layout",
+        "mango/window"
+    ],
+    "modules-center": [],
+    "modules-right": [
+        "tray",
+        "network",
+        "cpu",
+        "memory",
+        "pulseaudio",
+        "backlight",
+        "clock#date",
+        "clock#time",
+        "custom/power"
+    ],
+
+    "mango/workspaces": {
+        "hide-empty": true,
+        "overview-label": "OVERVIEW",
+        "on-click": "activate",
+        "on-click-right": "toggle"
+    },
+    "mango/layout": {
+        "format": "{}"
+    },
+    "mango/window": {
+        "format": "{}",
+        "on-click": "bash ~/.config/mango/scripts/screenshot.sh",
+        "on-click-right": "python /home/wrq/tool/ocr.py"
+    },
+
+    "network": {
+        "format": "󰈀 {ifname}"
+    },
+    "cpu": {
+        "format": " {load}%"
+    },
+    "memory": {
+        "format": " {}%"
+    },
+    "backlight": {
+        "format": "{icon} {percent}%",
+        "on-scroll-up": "bash ~/.config/mango/scripts/brightness.sh bup",
+        "on-scroll-down": "bash ~/.config/mango/scripts/brightness.sh bdown",
+        "on-click": "brightnessctl set 1%"
+    },
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": "󰝟 {volume}%",
+        "on-click": "pamixer -t",
+        "on-scroll-up": "pamixer -i 2",
+        "on-scroll-down": "pamixer -d 2"
+    },
+    "clock#date": {
+        "format": " {:L%b%d·%A}"
+    },
+    "clock#time": {
+        "format": " {:L%H:%M}"
+    },
+    "tray": {
+        "icon-size": 21,
+        "spacing": 10
+    },
+
+    "custom/power": {
+        "format": "󰣇",
+        "on-click": "wlogout -C ~/.config/mango/wlogout/style.css -l ~/.config/mango/wlogout/layout -b 6 --protocol layer-shell",
+        "on-click-right": "sleep 0.1s && swaync-client -t -sw"
+    }
+}

@@ -1,0 +1,621 @@
+#define _GNU_SOURCE
+#include "rtconfig.h"
+
+#include <cjson/cJSON.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+MangoConfig g_cfg;
+
+static void cfg_set(char *dst, size_t sz, const char *s) {
+  if (s)
+    snprintf(dst, sz, "%s", s);
+}
+
+// Strip // and block comments, and trailing commas (JSONC compatible)
+static char *jsonc_strip(const char *src) {
+  size_t n = strlen(src);
+  char *out = malloc(n + 1);
+  if (!out)
+    return NULL;
+  size_t o = 0;
+  bool in_str = false;
+  for (size_t i = 0; i < n; i++) {
+    char c = src[i];
+    if (in_str) {
+      out[o++] = c;
+      if (c == '\\' && i + 1 < n)
+        out[o++] = src[++i];
+      else if (c == '"')
+        in_str = false;
+      continue;
+    }
+    if (c == '"') {
+      in_str = true;
+      out[o++] = c;
+      continue;
+    }
+    if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+      while (i < n && src[i] != '\n')
+        i++;
+      if (i < n)
+        out[o++] = '\n';
+      continue;
+    }
+    if (c == '/' && i + 1 < n && src[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/'))
+        i++;
+      i++; // skip '/'
+      continue;
+    }
+    if (c == '}' || c == ']') {
+      size_t j = o;
+      while (j > 0 && (out[j - 1] == ' ' || out[j - 1] == '\t' ||
+                       out[j - 1] == '\n' || out[j - 1] == '\r'))
+        j--;
+      if (j > 0 && out[j - 1] == ',')
+        o = j - 1;
+    }
+    out[o++] = c;
+  }
+  out[o] = '\0';
+  return out;
+}
+
+static int cfg_int(cJSON *obj, const char *key, int fallback) {
+  cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+  if (cJSON_IsNumber(v))
+    return v->valueint;
+  if (cJSON_IsString(v))
+    return atoi(v->valuestring);
+  return fallback;
+}
+
+static bool cfg_bool(cJSON *obj, const char *key, bool fallback) {
+  cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+  if (cJSON_IsBool(v))
+    return cJSON_IsTrue(v);
+  if (cJSON_IsString(v))
+    return strcmp(v->valuestring, "true") == 0 ||
+           strcmp(v->valuestring, "1") == 0;
+  return fallback;
+}
+
+static void cfg_str(cJSON *obj, const char *key, char *dst, size_t sz) {
+  cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+  if (cJSON_IsString(v))
+    cfg_set(dst, sz, v->valuestring);
+}
+
+static int right_module_id(const char *name) {
+  if (!name)
+    return M_RIGHT_NONE;
+  if (strcmp(name, "cpu") == 0)
+    return M_RIGHT_CPU;
+  if (strcmp(name, "memory") == 0)
+    return M_RIGHT_MEM;
+  if (strcmp(name, "backlight") == 0)
+    return M_RIGHT_BRIGHTNESS;
+  if (strcmp(name, "pulseaudio") == 0)
+    return M_RIGHT_VOLUME;
+  if (strcmp(name, "clock") == 0 || strcmp(name, "clock#time") == 0)
+    return M_RIGHT_CLOCK_TIME;
+  if (strcmp(name, "clock#date") == 0)
+    return M_RIGHT_CLOCK_DATE;
+  if (strcmp(name, "mango/keymode") == 0)
+    return M_RIGHT_KEYMODE;
+  if (strcmp(name, "mango/language") == 0)
+    return M_RIGHT_KBLAYOUT;
+  if (strcmp(name, "network") == 0)
+    return M_RIGHT_NETWORK;
+  return M_RIGHT_NONE;
+}
+
+// Convert {:L%H:%M} time format to strftime
+static void convert_clock_format(const char *in, char *out, size_t sz) {
+  size_t o = 0;
+  const char *p = in ? in : "";
+  while (*p && o + 1 < sz) {
+    if (p[0] == '{' && p[1] == ':' && p[2] == 'L') {
+      p += 3;
+      while (*p && *p != '}' && o + 1 < sz)
+        out[o++] = *p++;
+      if (*p == '}')
+        p++;
+    } else {
+      out[o++] = *p++;
+    }
+  }
+  out[o] = '\0';
+}
+
+static void add_action(const char *module, const char *left,
+                       const char *middle, const char *right,
+                       const char *scroll_up, const char *scroll_down) {
+  if (g_cfg.action_count >= MANGOBAR_MAX_ACTIONS)
+    return;
+  MangoAction *a = &g_cfg.actions[g_cfg.action_count];
+  cfg_set(a->module, sizeof(a->module), module);
+  cfg_set(a->left, sizeof(a->left), left);
+  cfg_set(a->middle, sizeof(a->middle), middle);
+  cfg_set(a->right, sizeof(a->right), right);
+  cfg_set(a->scroll_up, sizeof(a->scroll_up), scroll_up);
+  cfg_set(a->scroll_down, sizeof(a->scroll_down), scroll_down);
+  g_cfg.action_count++;
+}
+
+static void set_action(const char *module, const char *left,
+                       const char *middle, const char *right,
+                       const char *scroll_up, const char *scroll_down) {
+  for (int i = 0; i < g_cfg.action_count; i++) {
+    if (strcmp(g_cfg.actions[i].module, module) == 0) {
+      cfg_set(g_cfg.actions[i].left, sizeof(g_cfg.actions[i].left), left);
+      cfg_set(g_cfg.actions[i].middle, sizeof(g_cfg.actions[i].middle),
+              middle);
+      cfg_set(g_cfg.actions[i].right, sizeof(g_cfg.actions[i].right), right);
+      cfg_set(g_cfg.actions[i].scroll_up, sizeof(g_cfg.actions[i].scroll_up),
+              scroll_up);
+      cfg_set(g_cfg.actions[i].scroll_down,
+              sizeof(g_cfg.actions[i].scroll_down), scroll_down);
+      return;
+    }
+  }
+  add_action(module, left, middle, right, scroll_up, scroll_down);
+}
+
+static MangoCustomModule *lookup_custom(const char *name) {
+  for (int i = 0; i < g_cfg.custom_count; i++) {
+    if (strcmp(g_cfg.customs[i].name, name) == 0)
+      return &g_cfg.customs[i];
+  }
+  return NULL;
+}
+
+static MangoCustomModule *find_custom(const char *name) {
+  MangoCustomModule *cm = lookup_custom(name);
+  if (cm)
+    return cm;
+  if (g_cfg.custom_count >= MANGOBAR_MAX_CUSTOM)
+    return NULL;
+  cm = &g_cfg.customs[g_cfg.custom_count++];
+  memset(cm, 0, sizeof(*cm));
+  snprintf(cm->name, sizeof(cm->name), "%s", name);
+  cm->enabled = true;
+  return cm;
+}
+
+// Parse a custom/<name> module definition
+static void parse_custom_module(cJSON *obj, const char *name) {
+  // Only configure modules that were actually placed in a modules-* list
+  MangoCustomModule *cm = lookup_custom(name);
+  if (!cm)
+    return;
+  cfg_str(obj, "exec", cm->exec, sizeof(cm->exec));
+  cm->interval = cfg_int(obj, "interval", 0);
+  cfg_str(obj, "format", cm->format, sizeof(cm->format));
+
+  char css_name[64];
+  snprintf(css_name, sizeof(css_name), "custom-%s", name);
+  set_action(css_name,
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-click")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-click-middle")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-click-right")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-scroll-up")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-scroll-down")));
+}
+
+// Map "activate"/"toggle" actions to mango IPC commands
+static const char *map_workspace_action(const char *a) {
+  if (!a)
+    return NULL;
+  if (strcmp(a, "activate") == 0)
+    return "@view";
+  if (strcmp(a, "toggle") == 0)
+    return "@toggle";
+  return a;
+}
+
+static void parse_modules(cJSON *root) {
+  cJSON *arr;
+  cJSON *item;
+
+  g_cfg.enable_tags = g_cfg.enable_layout = g_cfg.enable_title = false;
+  g_cfg.enable_cpu = g_cfg.enable_mem = g_cfg.enable_clock = false;
+  g_cfg.enable_brightness = g_cfg.enable_volume = false;
+  g_cfg.enable_keymode = g_cfg.enable_keyboardlayout = false;
+  g_cfg.enable_tray = false;
+  g_cfg.right_count = 0;
+  g_cfg.left_count = 0;
+
+  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-left");
+  if (cJSON_IsArray(arr)) {
+    cJSON_ArrayForEach(item, arr) {
+      if (!cJSON_IsString(item))
+        continue;
+      const char *name = item->valuestring;
+      if (strcmp(name, "mango/workspaces") == 0)
+        g_cfg.enable_tags = true;
+      else if (strcmp(name, "mango/layout") == 0)
+        g_cfg.enable_layout = true;
+      else if (strcmp(name, "mango/window") == 0)
+        g_cfg.enable_title = true;
+      else if (strncmp(name, "custom/", 7) == 0 &&
+               g_cfg.left_count < MANGOBAR_MAX_RIGHT_MODULES) {
+        MangoCustomModule *cm = find_custom(name + 7);
+        if (cm)
+          g_cfg.left_order[g_cfg.left_count++] = M_CUSTOM + (cm - g_cfg.customs);
+      }
+    }
+  }
+
+  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-center");
+  if (cJSON_IsArray(arr)) {
+    cJSON_ArrayForEach(item, arr) {
+      if (cJSON_IsString(item) && strcmp(item->valuestring, "mango/window") == 0)
+        g_cfg.enable_title = true;
+    }
+  }
+
+  g_cfg.right_count = 0;
+  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-right");
+  if (cJSON_IsArray(arr)) {
+    cJSON_ArrayForEach(item, arr) {
+      if (!cJSON_IsString(item))
+        continue;
+      const char *name = item->valuestring;
+      if (strcmp(name, "tray") == 0) {
+        g_cfg.enable_tray = true;
+        continue; // tray is always drawn on the right
+      }
+      if (strncmp(name, "custom/", 7) == 0 &&
+          g_cfg.right_count < MANGOBAR_MAX_RIGHT_MODULES) {
+        MangoCustomModule *cm = find_custom(name + 7);
+        if (cm)
+          g_cfg.right_order[g_cfg.right_count++] = M_CUSTOM + (cm - g_cfg.customs);
+        continue;
+      }
+      int id = right_module_id(name);
+      if (id != M_RIGHT_NONE && g_cfg.right_count < MANGOBAR_MAX_RIGHT_MODULES) {
+        g_cfg.right_order[g_cfg.right_count++] = id;
+        switch (id) {
+        case M_RIGHT_CPU:
+          g_cfg.enable_cpu = true;
+          break;
+        case M_RIGHT_MEM:
+          g_cfg.enable_mem = true;
+          break;
+        case M_RIGHT_BRIGHTNESS:
+          g_cfg.enable_brightness = true;
+          break;
+        case M_RIGHT_VOLUME:
+          g_cfg.enable_volume = true;
+          break;
+        case M_RIGHT_CLOCK_TIME:
+        case M_RIGHT_CLOCK_DATE:
+          g_cfg.enable_clock = true;
+          break;
+        case M_RIGHT_KEYMODE:
+          g_cfg.enable_keymode = true;
+          break;
+        case M_RIGHT_KBLAYOUT:
+          g_cfg.enable_keyboardlayout = true;
+          break;
+        case M_RIGHT_NETWORK:
+          break;
+        default:
+          break;
+        }
+      }
+    }
+  }
+}
+
+static void parse_module_configs(cJSON *root) {
+  cJSON *m;
+
+  // Custom modules live under custom/<name> keys
+  cJSON *child;
+  cJSON_ArrayForEach(child, root) {
+    if (!cJSON_IsObject(child) || !child->string)
+      continue;
+    if (strncmp(child->string, "custom/", 7) == 0)
+      parse_custom_module(child, child->string + 7);
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "mango/workspaces");
+  if (cJSON_IsObject(m)) {
+    g_cfg.only_occupied = cfg_bool(m, "hide-empty", true);
+    cfg_str(m, "overview-label", g_cfg.overview_label,
+            sizeof(g_cfg.overview_label));
+    set_action("tags", map_workspace_action(
+                           cJSON_GetObjectItemCaseSensitive(m, "on-click")
+                               ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click"))
+                               : NULL),
+               NULL,
+               map_workspace_action(
+                   cJSON_GetObjectItemCaseSensitive(m, "on-click-right")
+                       ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right"))
+                       : NULL),
+               NULL, NULL);
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "mango/layout");
+  if (cJSON_IsObject(m))
+    cfg_str(m, "format", g_cfg.layout_format, sizeof(g_cfg.layout_format));
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "mango/window");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.title_format, sizeof(g_cfg.title_format));
+    set_action(
+        "title",
+        cJSON_GetObjectItemCaseSensitive(m, "on-click")
+            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click"))
+            : NULL,
+        cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")
+            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle"))
+            : NULL,
+        cJSON_GetObjectItemCaseSensitive(m, "on-click-right")
+            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right"))
+            : NULL,
+        NULL, NULL);
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "mango/keymode");
+  if (cJSON_IsObject(m))
+    cfg_str(m, "format", g_cfg.keymode_format, sizeof(g_cfg.keymode_format));
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "mango/language");
+  if (cJSON_IsObject(m))
+    cfg_str(m, "format", g_cfg.keyboardlayout_format,
+            sizeof(g_cfg.keyboardlayout_format));
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "tray");
+  if (cJSON_IsObject(m)) {
+    g_cfg.tray_icon_size = cfg_int(m, "icon-size", g_cfg.tray_icon_size);
+    g_cfg.tray_gap = cfg_int(m, "spacing", g_cfg.tray_gap);
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "cpu");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.cpu_format, sizeof(g_cfg.cpu_format));
+    set_action("cpu", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "memory");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.mem_format, sizeof(g_cfg.mem_format));
+    set_action("mem", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "backlight");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.brightness_fmt,
+            sizeof(g_cfg.brightness_fmt));
+    cfg_str(m, "device", g_cfg.brightness_dev,
+            sizeof(g_cfg.brightness_dev));
+    set_action("brightness",
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "pulseaudio");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.volume_fmt, sizeof(g_cfg.volume_fmt));
+    cfg_str(m, "format-muted", g_cfg.volume_fmt_muted,
+            sizeof(g_cfg.volume_fmt_muted));
+    set_action("volume",
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "clock#time");
+  if (cJSON_IsObject(m)) {
+    char tmp[128];
+    cfg_str(m, "format", tmp, sizeof(tmp));
+    if (tmp[0])
+      convert_clock_format(tmp, g_cfg.clock_time_format,
+                           sizeof(g_cfg.clock_time_format));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "clock#date");
+  if (cJSON_IsObject(m)) {
+    char tmp[128];
+    cfg_str(m, "format", tmp, sizeof(tmp));
+    if (tmp[0])
+      convert_clock_format(tmp, g_cfg.clock_date_format,
+                           sizeof(g_cfg.clock_date_format));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "clock");
+  if (cJSON_IsObject(m) && !cJSON_GetObjectItemCaseSensitive(root, "clock#time")) {
+    char tmp[128];
+    cfg_str(m, "format", tmp, sizeof(tmp));
+    if (tmp[0])
+      convert_clock_format(tmp, g_cfg.clock_time_format,
+                           sizeof(g_cfg.clock_time_format));
+  }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "network");
+  if (cJSON_IsObject(m))
+    cfg_str(m, "format", g_cfg.network_format, sizeof(g_cfg.network_format));
+}
+
+void mango_config_defaults(void) {
+  memset(&g_cfg, 0, sizeof(g_cfg));
+  g_cfg.bar_height = 30;
+  g_cfg.buffer_scale = 1;
+  snprintf(g_cfg.font, sizeof(g_cfg.font), "%s",
+           "Maple Mono NF CN:style=Bold:size=24");
+  g_cfg.radius_default = 4;
+  g_cfg.layer = 2; // TOP
+  g_cfg.max_title_len = 50;
+  g_cfg.sys_interval = 2;
+  g_cfg.tag_count = 9;
+  for (int i = 0; i < g_cfg.tag_count && i < MANGOBAR_MAX_TAGS; i++)
+    snprintf(g_cfg.tag_names[i], sizeof(g_cfg.tag_names[i]), "%d", i + 1);
+  snprintf(g_cfg.overview_label, sizeof(g_cfg.overview_label), "%s",
+           "OVERVIEW");
+  g_cfg.enable_tags = true;
+  g_cfg.enable_layout = true;
+  g_cfg.enable_title = true;
+  g_cfg.enable_cpu = true;
+  g_cfg.enable_mem = true;
+  g_cfg.enable_clock = true;
+  g_cfg.enable_brightness = true;
+  g_cfg.enable_volume = true;
+  g_cfg.enable_keymode = false;
+  g_cfg.enable_keyboardlayout = false;
+  g_cfg.enable_tray = true;
+  g_cfg.only_occupied = true;
+  snprintf(g_cfg.separator, sizeof(g_cfg.separator), "%s", " | ");
+  g_cfg.tray_pad = 2;
+  g_cfg.tray_gap = 4;
+  snprintf(g_cfg.brightness_dev, sizeof(g_cfg.brightness_dev), "%s",
+           "");
+  snprintf(g_cfg.brightness_fmt, sizeof(g_cfg.brightness_fmt), "%s",
+           "☀{}%");
+  snprintf(g_cfg.volume_ctrl, sizeof(g_cfg.volume_ctrl), "%s",
+           "Master");
+  g_cfg.volume_mix_index = 0;
+  snprintf(g_cfg.volume_fmt, sizeof(g_cfg.volume_fmt), "%s",
+           "♪{}%");
+  snprintf(g_cfg.volume_fmt_muted, sizeof(g_cfg.volume_fmt_muted), "%s",
+           "🔇 {}%");
+  snprintf(g_cfg.layout_format, sizeof(g_cfg.layout_format), "%s", "{}");
+  snprintf(g_cfg.title_format, sizeof(g_cfg.title_format), "%s", "{}");
+  snprintf(g_cfg.cpu_format, sizeof(g_cfg.cpu_format), "%s", "CPU:{}%");
+  snprintf(g_cfg.mem_format, sizeof(g_cfg.mem_format), "%s", "MEM:{}%");
+  snprintf(g_cfg.clock_time_format, sizeof(g_cfg.clock_time_format), "%s",
+           "%H:%M");
+  snprintf(g_cfg.clock_date_format, sizeof(g_cfg.clock_date_format), "%s",
+           "%m-%d %a");
+  snprintf(g_cfg.keymode_format, sizeof(g_cfg.keymode_format), "%s", "{}");
+  snprintf(g_cfg.keyboardlayout_format, sizeof(g_cfg.keyboardlayout_format),
+           "%s", "{}");
+  snprintf(g_cfg.network_format, sizeof(g_cfg.network_format), "%s",
+           "{ifname}");
+  add_action("tags", "@view", NULL, NULL, NULL, NULL);
+  add_action("volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
+  add_action("brightness", NULL, NULL, NULL, "brightnessctl s +5%",
+             "brightnessctl s 5%-");
+  // Default right-module order
+  if (g_cfg.enable_keymode)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_KEYMODE;
+  if (g_cfg.enable_keyboardlayout)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_KBLAYOUT;
+  if (g_cfg.enable_cpu)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_CPU;
+  if (g_cfg.enable_mem)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_MEM;
+  if (g_cfg.enable_brightness)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_BRIGHTNESS;
+  if (g_cfg.enable_volume)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_VOLUME;
+  if (g_cfg.enable_clock)
+    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_CLOCK_TIME;
+  g_cfg.css_path[0] = '\0';
+}
+
+const char *mango_config_find_default(char *buf, size_t sz) {
+  const char *env = getenv("MANGOBAR_CONFIG");
+  if (env && *env && access(env, R_OK) == 0) {
+    snprintf(buf, sz, "%s", env);
+    return buf;
+  }
+  const char *xdg = getenv("XDG_CONFIG_HOME");
+  const char *home = getenv("HOME");
+  char p[512];
+  if (xdg && *xdg) {
+    snprintf(p, sizeof(p), "%s/mangobar/config.jsonc", xdg);
+    if (access(p, R_OK) == 0) {
+      snprintf(buf, sz, "%s", p);
+      return buf;
+    }
+  }
+  if (home && *home) {
+    snprintf(p, sizeof(p), "%s/.config/mangobar/config.jsonc", home);
+    if (access(p, R_OK) == 0) {
+      snprintf(buf, sz, "%s", p);
+      return buf;
+    }
+  }
+  return NULL;
+}
+
+int mango_config_load(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return -1;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz < 0) {
+    fclose(f);
+    return -1;
+  }
+  char *buf = malloc((size_t)sz + 1);
+  if (!buf) {
+    fclose(f);
+    return -1;
+  }
+  size_t rd = fread(buf, 1, (size_t)sz, f);
+  buf[rd] = '\0';
+  fclose(f);
+
+  char *stripped = jsonc_strip(buf);
+  free(buf);
+  if (!stripped)
+    return -1;
+  cJSON *root = cJSON_Parse(stripped);
+  free(stripped);
+  if (!root)
+    return -1;
+
+  cJSON *v;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "height")) &&
+      cJSON_IsNumber(v))
+    g_cfg.bar_height = v->valueint;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "buffer-scale")) &&
+      cJSON_IsNumber(v) && v->valueint > 0)
+    g_cfg.buffer_scale = v->valueint;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "font")) &&
+      cJSON_IsString(v))
+    cfg_set(g_cfg.font, sizeof(g_cfg.font), v->valuestring);
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "layer")) &&
+      cJSON_IsString(v)) {
+    if (strcmp(v->valuestring, "overlay") == 0)
+      g_cfg.layer = 3;
+    else if (strcmp(v->valuestring, "bottom") == 0)
+      g_cfg.layer = 1;
+    else
+      g_cfg.layer = 2;
+  }
+  // CSS style file (accepts "css" or "style")
+  v = cJSON_GetObjectItemCaseSensitive(root, "css");
+  if (!cJSON_IsString(v))
+    v = cJSON_GetObjectItemCaseSensitive(root, "style");
+  if (cJSON_IsString(v))
+    cfg_set(g_cfg.css_path, sizeof(g_cfg.css_path), v->valuestring);
+
+  parse_modules(root);
+  parse_module_configs(root);
+  cJSON_Delete(root);
+  return 0;
+}
