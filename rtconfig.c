@@ -467,7 +467,7 @@ void mango_config_defaults(void) {
   g_cfg.layer = 2; // TOP
   g_cfg.max_title_len = 50;
   g_cfg.sys_interval = 2;
-  g_cfg.tag_count = 9;
+  g_cfg.tag_count = MANGOBAR_MAX_TAGS;
   for (int i = 0; i < g_cfg.tag_count && i < MANGOBAR_MAX_TAGS; i++)
     snprintf(g_cfg.tag_names[i], sizeof(g_cfg.tag_names[i]), "%d", i + 1);
   snprintf(g_cfg.overview_label, sizeof(g_cfg.overview_label), "%s",
