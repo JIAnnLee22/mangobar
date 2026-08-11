@@ -2,7 +2,7 @@
 
 A Wayland status bar for mangowm, built on `wlr-layer-shell`.
 The system tray (StatusNotifierItem / DBusMenu) is inspired by
-[swaybar](https://github.com/swaywm/sway).
+[swaybar](https://github.com/swaywm/sway) and [waybar](https://github.com/Alexays/Waybar).
 
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/6c1ab40e-96fe-41a8-9d8a-89c45fa24db8" />
 
