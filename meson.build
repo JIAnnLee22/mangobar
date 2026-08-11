@@ -6,6 +6,7 @@ cc = meson.get_compiler('c')
 add_project_arguments(cc.get_supported_arguments('-Wno-unused-parameter'),
                       language: 'c')
 deps = [
+  dependency('threads'),
   dependency('wayland-client'),
   dependency('wayland-cursor'),
   dependency('fcft'),
@@ -15,6 +16,7 @@ deps = [
   dependency('pangocairo'),
   dependency('libpulse'),
   dependency('libsystemd'),
+  dependency('libudev'),
   dependency('gdk-pixbuf-2.0'),
   dependency('alsa'),
   cc.find_library('rt'),

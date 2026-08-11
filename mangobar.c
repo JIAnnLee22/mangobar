@@ -10,16 +10,20 @@
 #include <fcft/fcft.h>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
+#include <libudev.h>
 #include <pixman.h>
 #include <poll.h>
+#include <pthread.h>
 #include <pulse/pulseaudio.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -373,6 +377,22 @@ static double pointer_x, pointer_y;
 static int axis_steps[2];
 static wl_fixed_t axis_value[2];
 static bool sys_refresh; // force immediate system info refresh
+
+// Persistent PulseAudio context: volume changes arrive via subscription
+static pa_mainloop *pa_ml;
+static pa_context *pa_ctx;
+static atomic_int pa_pct = -1;
+static atomic_int pa_muted = -1;
+static atomic_bool pa_dirty;
+static int pulse_event_fd = -1;
+static pthread_t pulse_thread;
+static atomic_bool pa_running;
+
+// udev backlight monitor: external brightness changes
+static struct udev *g_udev;
+static struct udev_monitor *g_udev_mon;
+static int g_udev_fd = -1;
+static bool brightness_dirty;
 
 static const struct wl_pointer_listener pointer_listener;
 
@@ -2695,6 +2715,41 @@ static void update_brightness() {
   wl_list_for_each(bar, &bar_list, link) bar->brightness_pct = pct;
 }
 
+// Create the udev backlight monitor (called once).
+static void udev_init(void) {
+  if (g_udev)
+    return;
+  g_udev = udev_new();
+  if (!g_udev)
+    return;
+  g_udev_mon = udev_monitor_new_from_netlink(g_udev, "udev");
+  if (!g_udev_mon) {
+    udev_unref(g_udev);
+    g_udev = NULL;
+    return;
+  }
+  udev_monitor_filter_add_match_subsystem_devtype(g_udev_mon, "backlight",
+                                                  NULL);
+  udev_monitor_enable_receiving(g_udev_mon);
+  g_udev_fd = udev_monitor_get_fd(g_udev_mon);
+}
+
+// Handle a backlight uevent; mark the module dirty for redraw.
+static void udev_dispatch(void) {
+  if (!g_udev_mon)
+    return;
+  struct udev_device *dev = udev_monitor_receive_device(g_udev_mon);
+  if (!dev)
+    return;
+  const char *action = udev_device_get_action(dev);
+  const char *sysname = udev_device_get_sysname(dev);
+  if (action && strcmp(action, "change") == 0 && sysname &&
+      (!g_cfg.brightness_dev[0] ||
+       strcmp(sysname, g_cfg.brightness_dev) == 0))
+    brightness_dirty = true;
+  udev_device_unref(dev);
+}
+
 // Network: active interface name + optional speed (sampled in speed mode)
 static void update_network(void) {
   static char ifname[64];
@@ -2791,64 +2846,119 @@ static void update_network(void) {
   last_sec = now;
 }
 
-// PulseAudio sink callback: fill percent and mute state
-static void volume_sink_cb(pa_context *c, const pa_sink_info *i, int eol,
-                           void *userdata) {
-  int *vals = userdata;
-  (void)c;
-  (void)eol;
+// PulseAudio sink callback: cache percent and mute state
+static void pulse_sink_cb(pa_context *c, const pa_sink_info *i, int eol,
+                          void *userdata) {
   if (!i)
     return;
   pa_volume_t avg = pa_cvolume_avg(&i->volume);
   int pct = (int)((avg * 100) / PA_VOLUME_NORM);
-  vals[0] = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-  vals[1] = i->mute ? 1 : 0;
+  atomic_store(&pa_pct, pct < 0 ? 0 : (pct > 100 ? 100 : pct));
+  atomic_store(&pa_muted, i->mute ? 1 : 0);
+  atomic_store(&pa_dirty, true);
+  IPC_LOG("[pulse] sink pct=%d muted=%d\n", atomic_load(&pa_pct),
+          atomic_load(&pa_muted));
+  if (pulse_event_fd >= 0) {
+    uint64_t one = 1;
+    (void)write(pulse_event_fd, &one, sizeof(one));
+  }
 }
 
-// Read volume through the PulseAudio library (no shell commands)
-static void update_volume_pulse(int *pct, int *muted) {
-  int vals[2] = {-1, -1};
-  pa_mainloop *ml = pa_mainloop_new();
-  if (!ml)
+static void pulse_query(void) {
+  if (!pa_ctx || pa_context_get_state(pa_ctx) != PA_CONTEXT_READY)
     return;
-  pa_mainloop_api *api = pa_mainloop_get_api(ml);
-  pa_context *ctx = pa_context_new(api, "mangobar");
-  if (ctx && pa_context_connect(ctx, NULL, PA_CONTEXT_NOFLAGS, NULL) >= 0) {
-    uint64_t start = now_ms();
-    for (;;) {
-      pa_context_state_t st = pa_context_get_state(ctx);
-      if (st == PA_CONTEXT_READY || st == PA_CONTEXT_FAILED ||
-          st == PA_CONTEXT_TERMINATED || now_ms() - start > 500)
-        break;
-      if (pa_mainloop_iterate(ml, 1, NULL) < 0)
-        break;
-    }
-    if (pa_context_get_state(ctx) == PA_CONTEXT_READY) {
-      pa_operation *op =
-          pa_context_get_sink_info_by_name(ctx, NULL, volume_sink_cb, vals);
-      if (op) {
-        start = now_ms();
-        while (pa_operation_get_state(op) == PA_OPERATION_RUNNING &&
-               now_ms() - start <= 500 && pa_mainloop_iterate(ml, 1, NULL) >= 0)
-          ;
-        pa_operation_unref(op);
+  pa_operation *op =
+      pa_context_get_sink_info_by_name(pa_ctx, NULL, pulse_sink_cb, NULL);
+  if (op)
+    pa_operation_unref(op);
+}
+
+static void pulse_state_cb(pa_context *c, void *userdata) {
+  IPC_LOG("[pulse] state=%d\n", pa_context_get_state(c));
+  if (pa_context_get_state(c) == PA_CONTEXT_READY) {
+    pa_context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK, NULL, NULL);
+    pulse_query();
+  }
+}
+
+static void pulse_subscribe_cb(pa_context *c,
+                               pa_subscription_event_type_t t, uint32_t idx,
+                               void *userdata) {
+  IPC_LOG("[pulse] event type=%u\n", t);
+  if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK)
+    pulse_query();
+}
+
+// Recreate the context so a restarted audio server is picked up.
+static void pulse_reconnect(void) {
+  if (!pa_ml)
+    return;
+  atomic_store(&pa_pct, -1);
+  atomic_store(&pa_muted, -1);
+  if (pa_ctx) {
+    pa_context_disconnect(pa_ctx);
+    pa_context_unref(pa_ctx);
+  }
+  pa_ctx = pa_context_new(pa_mainloop_get_api(pa_ml), "mangobar");
+  if (!pa_ctx)
+    return;
+  pa_context_set_state_callback(pa_ctx, pulse_state_cb, NULL);
+  pa_context_set_subscribe_callback(pa_ctx, pulse_subscribe_cb, NULL);
+  pa_context_connect(pa_ctx, NULL, PA_CONTEXT_NOFLAGS, NULL);
+}
+
+static void *pulse_thread_fn(void *arg) {
+  uint64_t last_try = 0;
+  while (atomic_load(&pa_running) && pa_ml) {
+    // 100 ms bound keeps the reconnect check live without busy polling.
+    if (pa_mainloop_prepare(pa_ml, 100000) < 0)
+      break;
+    if (pa_mainloop_poll(pa_ml) < 0)
+      break;
+    if (pa_mainloop_dispatch(pa_ml) < 0)
+      break;
+    if (pa_ctx && (pa_context_get_state(pa_ctx) == PA_CONTEXT_FAILED ||
+                   pa_context_get_state(pa_ctx) == PA_CONTEXT_TERMINATED)) {
+      uint64_t now = now_ms();
+      if (now - last_try >= 2000) {
+        last_try = now;
+        IPC_LOG("[pulse] reconnecting\n");
+        pulse_reconnect();
       }
     }
   }
-  if (ctx) {
-    pa_context_disconnect(ctx);
-    pa_context_unref(ctx);
+  return NULL;
+}
+
+// Create the persistent PulseAudio context (called once).
+static void pulse_init(void) {
+  if (pa_ml)
+    return;
+  pa_ml = pa_mainloop_new();
+  if (!pa_ml)
+    return;
+  pulse_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  pa_mainloop_api *api = pa_mainloop_get_api(pa_ml);
+  pa_ctx = pa_context_new(api, "mangobar");
+  if (!pa_ctx) {
+    if (pulse_event_fd >= 0)
+      close(pulse_event_fd);
+    pulse_event_fd = -1;
+    pa_mainloop_free(pa_ml);
+    pa_ml = NULL;
+    return;
   }
-  pa_mainloop_free(ml);
-  *pct = vals[0];
-  *muted = vals[1];
+  pa_context_set_state_callback(pa_ctx, pulse_state_cb, NULL);
+  pa_context_set_subscribe_callback(pa_ctx, pulse_subscribe_cb, NULL);
+  pa_context_connect(pa_ctx, NULL, PA_CONTEXT_NOFLAGS, NULL);
+  atomic_store(&pa_running, true);
+  pthread_create(&pulse_thread, NULL, pulse_thread_fn, NULL);
 }
 
 static void update_volume() {
-  int pct = -1;
-  int muted = -1;
-  // PulseAudio library first; ALSA mixer as fallback
-  update_volume_pulse(&pct, &muted);
+  int pct = atomic_load(&pa_pct);
+  int muted = atomic_load(&pa_muted);
+  // ALSA fallback while PulseAudio isn't ready
   if (pct < 0) {
     snd_mixer_t *handle = NULL;
     if (snd_mixer_open(&handle, 0) == 0) {
@@ -2983,8 +3093,8 @@ static void event_loop() {
   int wl_fd = wl_display_get_fd(display);
   while (running) {
     int tray_fd = tray ? tray_get_fd(tray) : -1;
-    struct pollfd fds[3];
-    int nfds = 0, ipc_idx = -1, tray_idx = -1;
+    struct pollfd fds[5];
+    int nfds = 0, ipc_idx = -1, tray_idx = -1, pa_idx = -1, udev_idx = -1;
     fds[nfds++] =
         (struct pollfd){.fd = wl_fd, .events = POLLIN | POLLERR | POLLHUP};
     if (ipc_fd >= 0) {
@@ -2996,6 +3106,14 @@ static void event_loop() {
       short tev = tray_get_events(tray);
       fds[nfds++] = (struct pollfd){.fd = tray_fd,
                                     .events = (short)(POLLIN | tev)};
+    }
+    if (pulse_event_fd >= 0) {
+      pa_idx = nfds;
+      fds[nfds++] = (struct pollfd){.fd = pulse_event_fd, .events = POLLIN};
+    }
+    if (g_udev_fd >= 0) {
+      udev_idx = nfds;
+      fds[nfds++] = (struct pollfd){.fd = g_udev_fd, .events = POLLIN};
     }
     // Short timeout while refreshing or the menu is open.
     int timeout = 1000;
@@ -3063,9 +3181,27 @@ static void event_loop() {
     if (tray_idx >= 0 && (fds[tray_idx].revents & (POLLIN | POLLOUT))) {
       tray_dispatch(tray);
     }
+    if (pa_idx >= 0 && (fds[pa_idx].revents & POLLIN)) {
+      uint64_t v;
+      while (read(pulse_event_fd, &v, sizeof(v)) > 0)
+        ;
+    }
+    if (udev_idx >= 0 && (fds[udev_idx].revents & POLLIN))
+      udev_dispatch();
     if (sys_refresh) {
       sys_refresh = false;
       update_system_info();
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    }
+    if (atomic_exchange(&pa_dirty, false)) {
+      update_volume();
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    }
+    if (brightness_dirty) {
+      brightness_dirty = false;
+      update_brightness();
       Bar *b;
       wl_list_for_each(b, &bar_list, link) b->redraw = true;
     }
@@ -3332,6 +3468,8 @@ int main() {
   }
   update_system_info();
   update_custom_modules();
+  pulse_init();
+  udev_init();
   signal(SIGTERM, exit);
   signal(SIGINT, exit);
   signal(SIGCHLD, SIG_IGN); // reap action command children
@@ -3343,6 +3481,23 @@ int main() {
     close(ipc_fd);
   if (tray)
     tray_destroy(tray);
+  if (pa_ml) {
+    atomic_store(&pa_running, false);
+    pa_mainloop_wakeup(pa_ml);
+    pthread_join(pulse_thread, NULL);
+  }
+  if (pa_ctx)
+    pa_context_disconnect(pa_ctx);
+  if (pa_ctx)
+    pa_context_unref(pa_ctx);
+  if (pa_ml)
+    pa_mainloop_free(pa_ml);
+  if (pulse_event_fd >= 0)
+    close(pulse_event_fd);
+  if (g_udev_mon)
+    udev_monitor_unref(g_udev_mon);
+  if (g_udev)
+    udev_unref(g_udev);
   fcft_destroy(font);
   fcft_fini();
   wl_display_disconnect(display);
