@@ -301,6 +301,8 @@ typedef struct {
   int out_x, out_y; // output position in global coords
   int out_w, out_h; // output logical size
   bool configured;
+  int scale;          // effective buffer scale for this output
+  uint32_t logical_w, logical_h; // logical surface size
   uint32_t width, height;
   uint32_t stride, bufsize;
   uint32_t mtags, ctags, urg, sel;
@@ -333,6 +335,9 @@ static struct zwlr_layer_shell_v1 *layer_shell;
 static struct zxdg_output_manager_v1 *output_manager;
 static struct wl_list bar_list;
 static struct fcft_font *font;
+static struct fcft_font *g_draw_font; // scale-adjusted font for drawing
+static uint32_t g_draw_scale = 1;
+static char g_font_base[256]; // effective font string used for scaling
 static bool running = true;
 
 static struct wl_seat *seat;
@@ -416,7 +421,8 @@ static struct wl_buffer *create_transparent_buffer(uint32_t w, uint32_t h,
 
 // ========== Text drawing ==========
 // Measure rendered text width and bounds (incl. glyph bearings) in px
-static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x) {
+static uint32_t text_metrics_font(const struct fcft_font *f, const char *text,
+                                  int32_t *min_x, int32_t *max_x) {
   int32_t mn = INT32_MAX, mx = INT32_MIN;
   int32_t pen = 0;
   uint32_t state = 0, codepoint = 0, last_cp = 0;
@@ -424,12 +430,13 @@ static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x) {
     if (utf8_decode(&state, &codepoint, (uint8_t)*p))
       continue;
     const struct fcft_glyph *g =
-        fcft_rasterize_char_utf32(font, codepoint, FCFT_SUBPIXEL_NONE);
+        fcft_rasterize_char_utf32((struct fcft_font *)f, codepoint,
+                                  FCFT_SUBPIXEL_NONE);
     if (!g)
       continue;
     long kern = 0;
     if (last_cp)
-      fcft_kerning(font, last_cp, codepoint, &kern, NULL);
+      fcft_kerning((struct fcft_font *)f, last_cp, codepoint, &kern, NULL);
     pen += (int32_t)kern;
     int32_t gx = pen + g->x;
     if (gx < mn)
@@ -447,6 +454,37 @@ static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x) {
   return mn == INT32_MAX ? 0 : (uint32_t)(mx - mn);
 }
 
+static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x) {
+  return text_metrics_font(font, text, min_x, max_x);
+}
+
+// Create or fetch a font sized for `scale` (HiDPI rendering).
+static struct fcft_font *font_for_scale(int scale) {
+  static struct fcft_font *cache[8];
+  static int cached_scale[8];
+  if (scale < 1)
+    scale = 1;
+  if (scale > 7)
+    scale = 7;
+  if (cache[scale] && cached_scale[scale] == scale)
+    return cache[scale];
+  const char *sp = strstr(g_font_base, ":size=");
+  if (!sp || !g_font_base[0]) {
+    cache[scale] = font;
+    cached_scale[scale] = scale;
+    return font;
+  }
+  int logical = atoi(sp + 6);
+  int px = logical > 0 ? logical * scale : 0;
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%.*s:size=%d", (int)(sp - g_font_base),
+           g_font_base, px);
+  struct fcft_font *f = fcft_from_name(1, (const char *[]){buf}, NULL);
+  cache[scale] = f ? f : font;
+  cached_scale[scale] = scale;
+  return cache[scale];
+}
+
 static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
                           pixman_image_t *fg, pixman_image_t *fg_mask,
                           pixman_image_t *bg, pixman_color_t *fg_color,
@@ -454,47 +492,53 @@ static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
                           uint32_t buf_h) {
   if (!text || !*text || x >= max_x)
     return x;
+  uint32_t scale = g_draw_scale > 0 ? g_draw_scale : 1;
+  struct fcft_font *df = g_draw_font ? g_draw_font : font;
+  uint32_t dx = x * scale;
+  uint32_t dy = y * scale;
+  uint32_t dmax = max_x * scale;
+  uint32_t dbuf = buf_h * scale;
   // x is the glyph-box left; pen starts minus the first glyph's left bearing
   int32_t mn = 0;
-  text_metrics(text, &mn, NULL);
-  int32_t pen = (int32_t)x - mn;
+  text_metrics_font(df, text, &mn, NULL);
+  int32_t pen = (int32_t)dx - mn;
   uint32_t state = 0, codepoint = 0, last_cp = 0;
   for (const char *p = text; *p; p++) {
     if (utf8_decode(&state, &codepoint, (uint8_t)*p))
       continue;
     const struct fcft_glyph *g =
-        fcft_rasterize_char_utf32(font, codepoint, FCFT_SUBPIXEL_NONE);
+        fcft_rasterize_char_utf32(df, codepoint, FCFT_SUBPIXEL_NONE);
     if (!g)
       continue;
     long kern = 0;
     if (last_cp)
-      fcft_kerning(font, last_cp, codepoint, &kern, NULL);
+      fcft_kerning(df, last_cp, codepoint, &kern, NULL);
     pen += (int32_t)kern;
     int32_t gx = pen + g->x;
     int32_t gx2 = gx + g->width;
-    if (gx >= (int32_t)max_x)
+    if (gx >= (int32_t)dmax)
       break;
     last_cp = codepoint;
 
     if (fg && fg_color) {
       if (pixman_image_get_format(g->pix) == PIXMAN_a8r8g8b8) {
         pixman_image_composite32(PIXMAN_OP_OVER, g->pix, NULL, fg, 0, 0, 0, 0,
-                                 gx, y - g->y, g->width, g->height);
+                                 gx, (int32_t)dy - g->y, g->width, g->height);
       } else {
         pixman_image_fill_boxes(
             PIXMAN_OP_OVER, fg, fg_color, 1,
-            &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = buf_h});
+            &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = (int32_t)dbuf});
       }
       pixman_image_t *mask = pixman_image_create_solid_fill(
           &(pixman_color_t){0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF});
       pixman_image_composite32(PIXMAN_OP_OVER, g->pix, mask, fg_mask, 0, 0, 0,
-                               0, gx, y - g->y, g->width, g->height);
+                               0, gx, (int32_t)dy - g->y, g->width, g->height);
       pixman_image_unref(mask);
     }
     if (bg && bg_color)
       pixman_image_fill_boxes(
           PIXMAN_OP_OVER, bg, bg_color, 1,
-          &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = buf_h});
+          &(pixman_box32_t){.x1 = gx, .x2 = gx2, .y1 = 0, .y2 = (int32_t)dbuf});
     pen += g->advance.x;
   }
   return (uint32_t)(pen - mn);
@@ -505,7 +549,7 @@ static void record_hotspot(Bar *bar, const char *module, int tag, uint32_t x1,
                            uint32_t x2) {
   if (bar->hotspot_count >= MAX_HOTSPOTS)
     return;
-  uint32_t s = g_cfg.buffer_scale > 0 ? (uint32_t)g_cfg.buffer_scale : 1;
+  uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
   Hotspot *h = &bar->hotspots[bar->hotspot_count++];
   snprintf(h->module, sizeof(h->module), "%s", module ? module : "");
   h->tag = tag;
@@ -517,7 +561,7 @@ static void record_tray_hotspot(Bar *bar, MangobarTrayItem *item, uint32_t x1,
                                 uint32_t x2) {
   if (bar->tray_hotspot_count >= MAX_TRAY_HOTSPOTS)
     return;
-  uint32_t s = g_cfg.buffer_scale > 0 ? (uint32_t)g_cfg.buffer_scale : 1;
+  uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
   bar->tray_hotspots[bar->tray_hotspot_count++] =
       (TrayHotspot){item, x1 / s, x2 / s};
 }
@@ -565,10 +609,11 @@ static uint32_t draw_module(Bar *bar, const char *module, int tag,
                                 (double)buf_h, rad);
       cairo_fill(bar_bg_cr);
     } else {
+      uint32_t s = g_draw_scale > 0 ? g_draw_scale : 1;
       pixman_image_fill_boxes(
           PIXMAN_OP_OVER, bg, &st->bg, 1,
-          &(pixman_box32_t){.x1 = x1, .x2 = x2, .y1 = bar_top,
-                            .y2 = bar_top + buf_h});
+          &(pixman_box32_t){.x1 = x1 * s, .x2 = x2 * s, .y1 = bar_top * s,
+                            .y2 = (bar_top + buf_h) * s});
     }
     uint32_t text_x = x1 + st->pad_l;
     if (st->center) {
@@ -600,34 +645,38 @@ static void draw_tray_icon(pixman_image_t *dst, pixman_image_t *icon,
                            int dst_size, int dx, int dy) {
   if (!icon || dst_size <= 0)
     return;
+  int scale = g_draw_scale > 0 ? (int)g_draw_scale : 1;
+  int ds = dst_size * scale;
   int sw = pixman_image_get_width(icon);
   int sh = pixman_image_get_height(icon);
   if (sw <= 0 || sh <= 0)
     return;
   const uint32_t *src = (const uint32_t *)pixman_image_get_data(icon);
   pixman_image_t *scaled = pixman_image_create_bits(
-      PIXMAN_a8r8g8b8, dst_size, dst_size, NULL, dst_size * 4);
+      PIXMAN_a8r8g8b8, ds, ds, NULL, ds * 4);
   if (!scaled)
     return;
   uint32_t *dstbuf = (uint32_t *)pixman_image_get_data(scaled);
-  for (int yy = 0; yy < dst_size; yy++) {
-    int sy = yy * sh / dst_size;
+  for (int yy = 0; yy < ds; yy++) {
+    int sy = yy * sh / ds;
     if (sy >= sh)
       sy = sh - 1;
-    for (int xx = 0; xx < dst_size; xx++) {
-      int sx = xx * sw / dst_size;
+    for (int xx = 0; xx < ds; xx++) {
+      int sx = xx * sw / ds;
       if (sx >= sw)
         sx = sw - 1;
-      dstbuf[yy * dst_size + xx] = src[sy * sw + sx];
+      dstbuf[yy * ds + xx] = src[sy * sw + sx];
     }
   }
-  pixman_image_composite32(PIXMAN_OP_OVER, scaled, NULL, dst, 0, 0, 0, 0, dx,
-                           dy, dst_size, dst_size);
+  pixman_image_composite32(PIXMAN_OP_OVER, scaled, NULL, dst, 0, 0, 0, 0,
+                           dx * scale, dy * scale, ds, ds);
   pixman_image_unref(scaled);
 }
 
 static void draw_bar(Bar *bar) {
   IPC_LOG("[draw] %s enter\n", bar->name);
+  g_draw_scale = bar->scale > 0 ? (uint32_t)bar->scale : 1;
+  g_draw_font = font_for_scale(bar->scale);
   int fd = allocate_shm_file(bar->bufsize);
   if (fd < 0) {
     IPC_LOG("[draw] %s shm alloc FAILED\n", bar->name);
@@ -674,6 +723,7 @@ static void draw_bar(Bar *bar) {
           bar->height, bar->width * 4);
       if (cairo_surface_status(cs) == CAIRO_STATUS_SUCCESS) {
         bar_bg_cr = cairo_create(cs);
+        cairo_scale(bar_bg_cr, bar->scale, bar->scale);
         cairo_set_antialias(bar_bg_cr, CAIRO_ANTIALIAS_BEST);
       }
       cairo_surface_destroy(cs);
@@ -818,8 +868,8 @@ static void draw_bar(Bar *bar) {
                         st_tray.margin_r);
   }
 
-  uint32_t right_edge =
-      bar->width > bar_right ? bar->width - bar_right : 0;
+  uint32_t logical_w = bar->width / (bar->scale > 0 ? (uint32_t)bar->scale : 1);
+  uint32_t right_edge = logical_w > bar_right ? logical_w - bar_right : 0;
   // Right group (tray leftmost + modules) right-aligned
   right_total_w += tray_w;
   uint32_t right_group_left =
@@ -888,10 +938,11 @@ static void draw_bar(Bar *bar) {
 
   // Middle background + title (title hidden last)
   if (right_start > left_end) {
+    uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
     pixman_image_fill_boxes(
         PIXMAN_OP_SRC, bg, bar->sel ? &st_bar_sel.bg : &st_bar.bg, 1,
-        &(pixman_box32_t){.x1 = left_end, .x2 = right_start, .y1 = bar_top,
-                          .y2 = bar_top + bar_h});
+        &(pixman_box32_t){.x1 = left_end * s, .x2 = right_start * s,
+                          .y1 = bar_top * s, .y2 = (bar_top + bar_h) * s});
     if (g_cfg.enable_title && bar->title[0] != '\0') {
       uint32_t avail = right_start - left_end;
       char full_title[256], title_text[256];
@@ -991,7 +1042,7 @@ static void draw_bar(Bar *bar) {
   pixman_image_unref(final);
   munmap(data, bar->bufsize);
 
-  wl_surface_set_buffer_scale(bar->wl_surface, g_cfg.buffer_scale);
+  wl_surface_set_buffer_scale(bar->wl_surface, bar->scale);
   wl_surface_attach(bar->wl_surface, buf, 0, 0);
   wl_surface_damage_buffer(bar->wl_surface, 0, 0, bar->width, bar->height);
   wl_surface_commit(bar->wl_surface);
@@ -1003,10 +1054,12 @@ static void layer_surface_configure(void *data,
                                     uint32_t serial, uint32_t w, uint32_t h) {
   Bar *bar = data;
   zwlr_layer_surface_v1_ack_configure(surface, serial);
-  if (bar->configured && w == bar->width && h == bar->height)
+  if (bar->configured && w == bar->logical_w && h == bar->logical_h)
     return;
-  bar->width = w * g_cfg.buffer_scale;
-  bar->height = h * g_cfg.buffer_scale;
+  bar->logical_w = w;
+  bar->logical_h = h;
+  bar->width = w * (uint32_t)bar->scale;
+  bar->height = h * (uint32_t)bar->scale;
   bar->stride = bar->width * 4;
   bar->bufsize = bar->stride * bar->height;
   bar->configured = true;
@@ -1023,6 +1076,45 @@ static void layer_surface_closed(void *data,
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
     .configure = layer_surface_configure,
     .closed = layer_surface_closed,
+};
+
+static void wl_output_geometry(void *data, struct wl_output *output, int32_t x,
+                               int32_t y, int32_t phys_w, int32_t phys_h,
+                               int32_t subpixel, const char *make,
+                               const char *model, int32_t transform) {
+}
+
+static void wl_output_mode(void *data, struct wl_output *output,
+                           uint32_t flags, int32_t width, int32_t height,
+                           int32_t refresh) {
+}
+
+static void wl_output_done(void *data, struct wl_output *output) {
+}
+
+static void wl_output_scale(void *data, struct wl_output *output,
+                            int32_t factor) {
+  Bar *bar = data;
+  int scale = factor > 0 ? factor : 1;
+  if (g_cfg.buffer_scale > 1)
+    scale *= g_cfg.buffer_scale;
+  if (scale == bar->scale)
+    return;
+  bar->scale = scale;
+  if (bar->configured) {
+    bar->width = bar->logical_w * (uint32_t)scale;
+    bar->height = bar->logical_h * (uint32_t)scale;
+    bar->stride = bar->width * 4;
+    bar->bufsize = bar->stride * bar->height;
+    draw_bar(bar);
+  }
+}
+
+static const struct wl_output_listener wl_output_listener = {
+    .geometry = wl_output_geometry,
+    .mode = wl_output_mode,
+    .done = wl_output_done,
+    .scale = wl_output_scale,
 };
 
 static void output_name_handler(void *data, struct zxdg_output_v1 *xdg_output,
@@ -1082,11 +1174,13 @@ static void registry_global(void *data, struct wl_registry *registry,
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
     Bar *bar = calloc(1, sizeof(Bar));
     bar->registry_name = name;
-    bar->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 1);
+    bar->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 2);
+    wl_output_add_listener(bar->wl_output, &wl_output_listener, bar);
     bar->xdg_output =
         zxdg_output_manager_v1_get_xdg_output(output_manager, bar->wl_output);
     zxdg_output_v1_add_listener(bar->xdg_output, &output_listener, bar);
-    bar->height = (bar_h + bar_top) * g_cfg.buffer_scale;
+    bar->scale = g_cfg.buffer_scale > 0 ? g_cfg.buffer_scale : 1;
+    bar->height = (bar_h + bar_top) * (uint32_t)bar->scale;
     bar->wl_surface = wl_compositor_create_surface(compositor);
     bar->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
         layer_shell, bar->wl_surface, bar->wl_output, g_cfg.layer, "mangobar");
@@ -1465,7 +1559,9 @@ typedef struct {
   MangobarMenu *menu;
   struct wl_surface *surface;
   struct zwlr_layer_surface_v1 *layer_surface;
-  uint32_t width, height, stride, bufsize;
+  int scale; // buffer scale of the output the menu is on
+  uint32_t width, height; // logical size
+  uint32_t buf_width, buf_height, stride, bufsize;
   int item_h;
   int hover; // hovered row (incl. back row), -1 = none
   uint64_t hover_ms; // hover start time (ms) for delayed submenu open
@@ -1478,7 +1574,8 @@ typedef struct {
   // Side submenu
   struct wl_surface *sub_surface;
   struct zwlr_layer_surface_v1 *sub_layer_surface;
-  uint32_t sub_width, sub_height, sub_stride, sub_bufsize;
+  uint32_t sub_width, sub_height; // logical size
+  uint32_t sub_buf_width, sub_buf_height, sub_stride, sub_bufsize;
   int sub_hover;
   int margin_left, margin_top; // main menu position in the output
   const MangobarMenuNode *sub_node;
@@ -1692,16 +1789,17 @@ static void draw_menu_popup(void) {
   }
   struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, popup.bufsize);
   struct wl_buffer *buf = wl_shm_pool_create_buffer(
-      pool, 0, popup.width, popup.height, popup.stride,
+      pool, 0, popup.buf_width, popup.buf_height, popup.stride,
       WL_SHM_FORMAT_ARGB8888);
   wl_buffer_add_listener(buf, &wl_buffer_listener, NULL);
   wl_shm_pool_destroy(pool);
   close(fd);
 
   cairo_surface_t *cs = cairo_image_surface_create_for_data(
-      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.width, popup.height,
-      popup.stride);
+      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.buf_width,
+      popup.buf_height, popup.stride);
   cairo_t *cr = cairo_create(cs);
+  cairo_scale(cr, popup.scale, popup.scale);
   cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
   double rad = g_style_sheet.menu_radius > 0 ? g_style_sheet.menu_radius : 10;
@@ -1803,7 +1901,8 @@ static void draw_menu_popup(void) {
   munmap(data, popup.bufsize);
 
   wl_surface_attach(popup.surface, buf, 0, 0);
-  wl_surface_damage_buffer(popup.surface, 0, 0, popup.width, popup.height);
+  wl_surface_damage_buffer(popup.surface, 0, 0, popup.buf_width,
+                           popup.buf_height);
   wl_surface_commit(popup.surface);
 }
 
@@ -1811,10 +1910,13 @@ static void popup_layer_configure(void *data,
                                   struct zwlr_layer_surface_v1 *surface,
                                   uint32_t serial, uint32_t w, uint32_t h) {
   zwlr_layer_surface_v1_ack_configure(surface, serial);
-  popup.width = w * g_cfg.buffer_scale;
-  popup.height = h * g_cfg.buffer_scale;
-  popup.stride = popup.width * 4;
-  popup.bufsize = popup.stride * popup.height;
+  popup.width = w;
+  popup.height = h;
+  uint32_t s = popup.scale > 0 ? (uint32_t)popup.scale : 1;
+  popup.buf_width = w * s;
+  popup.buf_height = h * s;
+  popup.stride = popup.buf_width * 4;
+  popup.bufsize = popup.stride * popup.buf_height;
   popup.configured = true;
   draw_menu_popup();
 }
@@ -1934,16 +2036,17 @@ static void draw_submenu(void) {
   }
   struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, popup.sub_bufsize);
   struct wl_buffer *buf = wl_shm_pool_create_buffer(
-      pool, 0, popup.sub_width, popup.sub_height, popup.sub_stride,
+      pool, 0, popup.sub_buf_width, popup.sub_buf_height, popup.sub_stride,
       WL_SHM_FORMAT_ARGB8888);
   wl_buffer_add_listener(buf, &wl_buffer_listener, NULL);
   wl_shm_pool_destroy(pool);
   close(fd);
 
   cairo_surface_t *cs = cairo_image_surface_create_for_data(
-      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.sub_width,
-      popup.sub_height, popup.sub_stride);
+      (unsigned char *)data, CAIRO_FORMAT_ARGB32, popup.sub_buf_width,
+      popup.sub_buf_height, popup.sub_stride);
   cairo_t *cr = cairo_create(cs);
+  cairo_scale(cr, popup.scale, popup.scale);
   cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
   double rad = g_style_sheet.menu_radius > 0 ? g_style_sheet.menu_radius : 10;
@@ -2019,8 +2122,8 @@ static void draw_submenu(void) {
   munmap(data, popup.sub_bufsize);
 
   wl_surface_attach(popup.sub_surface, buf, 0, 0);
-  wl_surface_damage_buffer(popup.sub_surface, 0, 0, popup.sub_width,
-                           popup.sub_height);
+  wl_surface_damage_buffer(popup.sub_surface, 0, 0, popup.sub_buf_width,
+                           popup.sub_buf_height);
   wl_surface_commit(popup.sub_surface);
 }
 
@@ -2028,10 +2131,13 @@ static void submenu_layer_configure(void *data,
                                     struct zwlr_layer_surface_v1 *surface,
                                     uint32_t serial, uint32_t w, uint32_t h) {
   zwlr_layer_surface_v1_ack_configure(surface, serial);
-  popup.sub_width = w * g_cfg.buffer_scale;
-  popup.sub_height = h * g_cfg.buffer_scale;
-  popup.sub_stride = popup.sub_width * 4;
-  popup.sub_bufsize = popup.sub_stride * popup.sub_height;
+  popup.sub_width = w;
+  popup.sub_height = h;
+  uint32_t s = popup.scale > 0 ? (uint32_t)popup.scale : 1;
+  popup.sub_buf_width = w * s;
+  popup.sub_buf_height = h * s;
+  popup.sub_stride = popup.sub_buf_width * 4;
+  popup.sub_bufsize = popup.sub_stride * popup.sub_buf_height;
   popup.sub_configured = true;
   draw_submenu();
 }
@@ -2085,6 +2191,7 @@ static void submenu_open(const MangobarMenuNode *node) {
   popup.sub_node = node;
   popup.sub_hover = -1;
   popup.sub_surface = wl_compositor_create_surface(compositor);
+  wl_surface_set_buffer_scale(popup.sub_surface, popup.scale);
   popup.sub_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
       layer_shell, popup.sub_surface, popup.output,
       ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "mangobar-menu-sub");
@@ -2106,16 +2213,18 @@ static void grab_layer_configure(void *data,
                                  struct zwlr_layer_surface_v1 *surface,
                                  uint32_t serial, uint32_t w, uint32_t h) {
   zwlr_layer_surface_v1_ack_configure(surface, serial);
-  if (popup.grab_width == w && popup.grab_height == h && popup.grab_buffer)
+  uint32_t s = popup.scale > 0 ? (uint32_t)popup.scale : 1;
+  uint32_t bw = w * s, bh = h * s;
+  if (popup.grab_width == bw && popup.grab_height == bh && popup.grab_buffer)
     return;
   if (popup.grab_buffer) {
     wl_buffer_destroy(popup.grab_buffer);
     popup.grab_buffer = NULL;
   }
-  popup.grab_width = w;
-  popup.grab_height = h;
+  popup.grab_width = bw;
+  popup.grab_height = bh;
   popup.grab_buffer = create_transparent_buffer(
-      w, h, &popup.grab_stride, &popup.grab_bufsize);
+      bw, bh, &popup.grab_stride, &popup.grab_bufsize);
   if (popup.grab_buffer) {
     wl_surface_attach(popup.grab_surface, popup.grab_buffer, 0, 0);
     wl_surface_commit(popup.grab_surface);
@@ -2135,6 +2244,7 @@ static const struct zwlr_layer_surface_v1_listener grab_layer_listener = {
 
 static void grab_create(Bar *bar) {
   popup.grab_surface = wl_compositor_create_surface(compositor);
+  wl_surface_set_buffer_scale(popup.grab_surface, bar->scale);
   popup.grab_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
       layer_shell, popup.grab_surface, bar->wl_output,
       ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "mangobar-menu-grab");
@@ -2179,9 +2289,11 @@ static void menu_open(Bar *bar, MangobarTrayItem *item, double lx, double ly) {
   if (!popup.menu)
     return;
   popup.output = bar->wl_output;
+  popup.scale = bar->scale > 0 ? bar->scale : 1;
   // Create the grab layer first (below the menu) to catch outside clicks
   grab_create(bar);
   popup.surface = wl_compositor_create_surface(compositor);
+  wl_surface_set_buffer_scale(popup.surface, popup.scale);
   popup.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
       layer_shell, popup.surface, popup.output, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
       "mangobar-menu");
@@ -2193,8 +2305,7 @@ static void menu_open(Bar *bar, MangobarTrayItem *item, double lx, double ly) {
   // Record position / output size for layout clamping
   popup.lx = (int)lx;
   popup.ly = (int)ly;
-  popup.bar_h =
-      bar->height / (g_cfg.buffer_scale > 0 ? g_cfg.buffer_scale : 1);
+  popup.bar_h = bar->height / (popup.scale > 0 ? popup.scale : 1);
   popup.out_w = bar->out_w;
   popup.out_h = bar->out_h;
   IPC_LOG("[menu] open bar_height=%u bar_h=%d lx=%d ly=%d out=%dx%d\n",
@@ -3072,13 +3183,13 @@ int main() {
   }
 
   fcft_init(FCFT_LOG_COLORIZE_AUTO, 0, FCFT_LOG_CLASS_ERROR);
-  font = fcft_from_name(1,
-                        (const char *[]){style_font_string(&g_style_sheet,
-                                                           g_cfg.font)},
-                        NULL);
+  snprintf(g_font_base, sizeof(g_font_base), "%s",
+           style_font_string(&g_style_sheet, g_cfg.font));
+  font = fcft_from_name(1, (const char *[]){g_font_base}, NULL);
   if (!font) {
     // Fall back to the config font if the CSS font fails
-    font = fcft_from_name(1, (const char *[]){g_cfg.font}, NULL);
+    snprintf(g_font_base, sizeof(g_font_base), "%s", g_cfg.font);
+    font = fcft_from_name(1, (const char *[]){g_font_base}, NULL);
   }
   if (!font) {
     fprintf(stderr, "Failed to load fonts\n");

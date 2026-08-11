@@ -70,6 +70,11 @@ The JSONC config supports `height`, `layer`, `buffer-scale`, `font`,
 come from JSONC and CSS. See [`config.jsonc`](config.jsonc) for a complete
 example.
 
+`buffer-scale` is a multiplier on top of the output's Wayland scale
+(default `1`); leave it at `1` to follow the display's HiDPI scale
+automatically. Text, icons and menus are rendered at the effective scale
+so they stay sharp.
+
 CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 
 ## Modules
