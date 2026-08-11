@@ -9,6 +9,7 @@
 #define MANGOBAR_MAX_ACTIONS 32
 #define MANGOBAR_MAX_RIGHT_MODULES 16
 #define MANGOBAR_MAX_CUSTOM 16
+#define MANGOBAR_MAX_ALTS 48
 
 enum MangoRightModule {
   M_RIGHT_NONE = 0,
@@ -42,6 +43,11 @@ typedef struct {
   char scroll_up[256];
   char scroll_down[256];
 } MangoAction;
+
+typedef struct {
+  char module[32]; /* internal module name, e.g. "cpu", "custom-power" */
+  char fmt[256];   /* format-alt string */
+} MangoAltFormat;
 
 typedef struct {
   int bar_height;
@@ -93,6 +99,8 @@ typedef struct {
   int custom_count;
   MangoAction actions[MANGOBAR_MAX_ACTIONS];
   int action_count;
+  MangoAltFormat alts[MANGOBAR_MAX_ALTS];
+  int alt_count;
   char css_path[512];
 } MangoConfig;
 

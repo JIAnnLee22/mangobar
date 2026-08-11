@@ -169,6 +169,28 @@ static void set_action(const char *module, const char *left,
   add_action(module, left, middle, right, scroll_up, scroll_down);
 }
 
+static void set_alt(const char *module, const char *fmt) {
+  if (!module || !fmt || !*fmt)
+    return;
+  for (int i = 0; i < g_cfg.alt_count; i++) {
+    if (strcmp(g_cfg.alts[i].module, module) == 0) {
+      cfg_set(g_cfg.alts[i].fmt, sizeof(g_cfg.alts[i].fmt), fmt);
+      return;
+    }
+  }
+  if (g_cfg.alt_count >= MANGOBAR_MAX_ALTS)
+    return;
+  MangoAltFormat *a = &g_cfg.alts[g_cfg.alt_count++];
+  snprintf(a->module, sizeof(a->module), "%s", module);
+  cfg_set(a->fmt, sizeof(a->fmt), fmt);
+}
+
+static void cfg_alt(cJSON *m, const char *module) {
+  cJSON *v = cJSON_GetObjectItemCaseSensitive(m, "format-alt");
+  if (cJSON_IsString(v))
+    set_alt(module, v->valuestring);
+}
+
 static MangoCustomModule *lookup_custom(const char *name) {
   for (int i = 0; i < g_cfg.custom_count; i++) {
     if (strcmp(g_cfg.customs[i].name, name) == 0)
@@ -202,6 +224,7 @@ static void parse_custom_module(cJSON *obj, const char *name) {
 
   char css_name[64];
   snprintf(css_name, sizeof(css_name), "custom-%s", name);
+  cfg_alt(obj, css_name);
   set_action(css_name,
              cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-click")),
              cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "on-click-middle")),
@@ -355,14 +378,17 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "layout");
   if (!cJSON_IsObject(m))
     m = cJSON_GetObjectItemCaseSensitive(root, "mango/layout");
-  if (cJSON_IsObject(m))
+  if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.layout_format, sizeof(g_cfg.layout_format));
+    cfg_alt(m, "layout");
+  }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "window");
   if (!cJSON_IsObject(m))
     m = cJSON_GetObjectItemCaseSensitive(root, "mango/window");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.title_format, sizeof(g_cfg.title_format));
+    cfg_alt(m, "title");
     set_action(
         "title",
         cJSON_GetObjectItemCaseSensitive(m, "on-click")
@@ -380,17 +406,21 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "keymode");
   if (!cJSON_IsObject(m))
     m = cJSON_GetObjectItemCaseSensitive(root, "mango/keymode");
-  if (cJSON_IsObject(m))
+  if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.keymode_format, sizeof(g_cfg.keymode_format));
+    cfg_alt(m, "keymode");
+  }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "keyboardlayout");
   if (!cJSON_IsObject(m))
     m = cJSON_GetObjectItemCaseSensitive(root, "language");
   if (!cJSON_IsObject(m))
     m = cJSON_GetObjectItemCaseSensitive(root, "mango/language");
-  if (cJSON_IsObject(m))
+  if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.keyboardlayout_format,
             sizeof(g_cfg.keyboardlayout_format));
+    cfg_alt(m, "keyboardlayout");
+  }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "tray");
   if (cJSON_IsObject(m)) {
@@ -401,6 +431,7 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "cpu");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.cpu_format, sizeof(g_cfg.cpu_format));
+    cfg_alt(m, "cpu");
     set_action("cpu", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
@@ -411,6 +442,7 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "memory");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.mem_format, sizeof(g_cfg.mem_format));
+    cfg_alt(m, "mem");
     set_action("mem", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
@@ -422,6 +454,7 @@ static void parse_module_configs(cJSON *root) {
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.brightness_fmt,
             sizeof(g_cfg.brightness_fmt));
+    cfg_alt(m, "brightness");
     cfg_str(m, "device", g_cfg.brightness_dev,
             sizeof(g_cfg.brightness_dev));
     set_action("brightness",
@@ -437,6 +470,7 @@ static void parse_module_configs(cJSON *root) {
     cfg_str(m, "format", g_cfg.volume_fmt, sizeof(g_cfg.volume_fmt));
     cfg_str(m, "format-muted", g_cfg.volume_fmt_muted,
             sizeof(g_cfg.volume_fmt_muted));
+    cfg_alt(m, "volume");
     set_action("volume",
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
@@ -452,6 +486,13 @@ static void parse_module_configs(cJSON *root) {
     if (tmp[0])
       convert_clock_format(tmp, g_cfg.clock_time_format,
                            sizeof(g_cfg.clock_time_format));
+    char alt[128] = {0};
+    cfg_str(m, "format-alt", alt, sizeof(alt));
+    if (alt[0]) {
+      char conv[128];
+      convert_clock_format(alt, conv, sizeof(conv));
+      set_alt("clock", conv);
+    }
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "clock#date");
@@ -461,6 +502,13 @@ static void parse_module_configs(cJSON *root) {
     if (tmp[0])
       convert_clock_format(tmp, g_cfg.clock_date_format,
                            sizeof(g_cfg.clock_date_format));
+    char alt[128] = {0};
+    cfg_str(m, "format-alt", alt, sizeof(alt));
+    if (alt[0]) {
+      char conv[128];
+      convert_clock_format(alt, conv, sizeof(conv));
+      set_alt("clock.date", conv);
+    }
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "clock");
@@ -470,11 +518,20 @@ static void parse_module_configs(cJSON *root) {
     if (tmp[0])
       convert_clock_format(tmp, g_cfg.clock_time_format,
                            sizeof(g_cfg.clock_time_format));
+    char alt[128] = {0};
+    cfg_str(m, "format-alt", alt, sizeof(alt));
+    if (alt[0]) {
+      char conv[128];
+      convert_clock_format(alt, conv, sizeof(conv));
+      set_alt("clock", conv);
+    }
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "network");
-  if (cJSON_IsObject(m))
+  if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.network_format, sizeof(g_cfg.network_format));
+    cfg_alt(m, "network");
+  }
 }
 
 void mango_config_defaults(void) {

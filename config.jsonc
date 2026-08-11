@@ -41,7 +41,8 @@
     },
 
     "network": {
-        "format": "󰈀 {ifname}"
+        "format": "󰈀 {ifname}",
+        "format-alt": "↓{down} ↑{up}"
     },
     "cpu": {
         "format": " {load}%"

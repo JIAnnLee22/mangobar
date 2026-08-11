@@ -258,6 +258,28 @@ static void format_speed(double kbps, char *out, size_t outsz) {
     snprintf(out, outsz, "%.0fKB/s", kbps);
 }
 
+// Replace {down}/{up} in a network format and fill the rest with format_value
+static void format_network_alt(const char *fmt, const char *ifname,
+                               const char *down, const char *up, char *out,
+                               size_t outsz) {
+  char tmp[512];
+  size_t o = 0;
+  const char *p = fmt ? fmt : "";
+  while (*p && o + 1 < sizeof(tmp)) {
+    if (strncmp(p, "{down}", 6) == 0) {
+      o += snprintf(tmp + o, sizeof(tmp) - o, "%s", down);
+      p += 6;
+    } else if (strncmp(p, "{up}", 4) == 0) {
+      o += snprintf(tmp + o, sizeof(tmp) - o, "%s", up);
+      p += 4;
+    } else {
+      tmp[o++] = *p++;
+    }
+  }
+  tmp[o] = '\0';
+  format_value(tmp, ifname, "", out, outsz);
+}
+
 // Truncate text to available width (with "..."), for window etc.
 static void fit_text_width(const char *text, char *out, size_t outsz,
                            uint32_t avail, uint32_t pads) {
@@ -317,7 +339,7 @@ typedef struct {
   int brightness_pct, volume_pct;
   bool volume_muted;
   char time_str[16];
-  bool net_speed_mode;
+  uint8_t alt_on[MANGOBAR_MAX_ALTS];
   char net_ifname[64];
   double net_rx_kbps, net_tx_kbps;
   bool redraw;
@@ -642,14 +664,28 @@ static uint32_t draw_module(Bar *bar, const char *module, int tag,
   return x;
 }
 
+static int alt_index(const char *module) {
+  for (int i = 0; i < g_cfg.alt_count; i++)
+    if (strcmp(g_cfg.alts[i].module, module) == 0)
+      return i;
+  return -1;
+}
+
+// Format string with format-alt applied when toggled.
+static const char *module_fmt(const char *module, const char *fallback,
+                              const Bar *bar) {
+  int ai = alt_index(module);
+  return (ai >= 0 && bar->alt_on[ai]) ? g_cfg.alts[ai].fmt : fallback;
+}
+
 // Fill custom module text and CSS/action name; false when disabled
-static bool custom_module_text(int ci, char *dst, size_t dstsz, char *name,
-                               size_t namesz) {
+static bool custom_module_text(const Bar *bar, int ci, char *dst, size_t dstsz,
+                               char *name, size_t namesz) {
   if (ci < 0 || ci >= g_cfg.custom_count || !g_cfg.customs[ci].enabled)
     return false;
   const MangoCustomModule *cm = &g_cfg.customs[ci];
-  format_value(cm->format, cm->output, "", dst, dstsz);
   snprintf(name, namesz, "custom-%s", cm->name);
+  format_value(module_fmt(name, cm->format, bar), cm->output, "", dst, dstsz);
   return true;
 }
 
@@ -768,64 +804,83 @@ static void draw_bar(Bar *bar) {
     char *dst = mod_text[mod_count];
     switch (id) {
     case M_RIGHT_CPU:
-      format_int(g_cfg.cpu_format, bar->cpu_pct, "", dst, sizeof(mod_text[0]));
+      format_int(module_fmt("cpu", g_cfg.cpu_format, bar), bar->cpu_pct, "",
+                 dst, sizeof(mod_text[0]));
       st = &st_cpu;
       mname = "cpu";
-      ensure_numeric_min_width(st, g_cfg.cpu_format, "");
+      ensure_numeric_min_width(st, module_fmt("cpu", g_cfg.cpu_format, bar),
+                               "");
       break;
     case M_RIGHT_MEM:
-      format_int(g_cfg.mem_format, bar->mem_pct, "", dst, sizeof(mod_text[0]));
+      format_int(module_fmt("mem", g_cfg.mem_format, bar), bar->mem_pct, "",
+                 dst, sizeof(mod_text[0]));
       st = &st_mem;
       mname = "mem";
-      ensure_numeric_min_width(st, g_cfg.mem_format, "");
+      ensure_numeric_min_width(st, module_fmt("mem", g_cfg.mem_format, bar),
+                               "");
       break;
     case M_RIGHT_BRIGHTNESS:
-      format_int(g_cfg.brightness_fmt, bar->brightness_pct, "☀", dst,
-                 sizeof(mod_text[0]));
+      format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
+                 bar->brightness_pct, "☀", dst, sizeof(mod_text[0]));
       st = &st_brightness;
       mname = "brightness";
-      ensure_numeric_min_width(st, g_cfg.brightness_fmt, "☀");
+      ensure_numeric_min_width(st,
+                               module_fmt("brightness", g_cfg.brightness_fmt,
+                                          bar),
+                               "☀");
       break;
     case M_RIGHT_VOLUME:
-      if (bar->volume_muted)
-        format_int(g_cfg.volume_fmt_muted, bar->volume_pct, "🔇", dst,
-                   sizeof(mod_text[0]));
-      else
-        format_int(g_cfg.volume_fmt, bar->volume_pct, "", dst,
-                   sizeof(mod_text[0]));
+      {
+        int ai = alt_index("volume");
+        if (ai >= 0 && bar->alt_on[ai]) {
+          format_int(g_cfg.alts[ai].fmt, bar->volume_pct, "", dst,
+                     sizeof(mod_text[0]));
+        } else if (bar->volume_muted) {
+          format_int(g_cfg.volume_fmt_muted, bar->volume_pct, "🔇", dst,
+                     sizeof(mod_text[0]));
+        } else {
+          format_int(g_cfg.volume_fmt, bar->volume_pct, "", dst,
+                     sizeof(mod_text[0]));
+        }
+      }
       st = &st_volume;
       mname = "volume";
       ensure_numeric_min_width(st, g_cfg.volume_fmt, "");
       ensure_numeric_min_width(st, g_cfg.volume_fmt_muted, "🔇");
       break;
     case M_RIGHT_CLOCK_TIME:
-      strftime(dst, sizeof(mod_text[0]), g_cfg.clock_time_format, tm);
+      strftime(dst, sizeof(mod_text[0]),
+               module_fmt("clock", g_cfg.clock_time_format, bar), tm);
       st = &st_clock;
       mname = "clock";
       break;
     case M_RIGHT_CLOCK_DATE:
-      strftime(dst, sizeof(mod_text[0]), g_cfg.clock_date_format, tm);
+      strftime(dst, sizeof(mod_text[0]),
+               module_fmt("clock.date", g_cfg.clock_date_format, bar), tm);
       st = &st_clock_date;
-      mname = "clock";
+      mname = "clock.date";
       break;
     case M_RIGHT_KEYMODE:
-      format_value(g_cfg.keymode_format, bar->keymode, "", dst,
-                   sizeof(mod_text[0]));
+      format_value(module_fmt("keymode", g_cfg.keymode_format, bar),
+                   bar->keymode, "", dst, sizeof(mod_text[0]));
       st = &st_keymode;
       mname = "keymode";
       break;
     case M_RIGHT_KBLAYOUT:
-      format_value(g_cfg.keyboardlayout_format, bar->kb_layout, "", dst,
-                   sizeof(mod_text[0]));
+      format_value(module_fmt("keyboardlayout", g_cfg.keyboardlayout_format,
+                              bar),
+                   bar->kb_layout, "", dst, sizeof(mod_text[0]));
       st = &st_keyboardlayout;
       mname = "keyboardlayout";
       break;
     case M_RIGHT_NETWORK: {
-      if (bar->net_speed_mode) {
+      int ai = alt_index("network");
+      if (ai >= 0 && bar->alt_on[ai]) {
         char down[32], up[32];
         format_speed(bar->net_rx_kbps, down, sizeof(down));
         format_speed(bar->net_tx_kbps, up, sizeof(up));
-        snprintf(dst, sizeof(mod_text[0]), "↓%.16s ↑%.16s", down, up);
+        format_network_alt(g_cfg.alts[ai].fmt, bar->net_ifname, down, up, dst,
+                           sizeof(mod_text[0]));
       } else {
         format_value(g_cfg.network_format, bar->net_ifname, "", dst,
                      sizeof(mod_text[0]));
@@ -836,7 +891,7 @@ static void draw_bar(Bar *bar) {
     }
     case M_CUSTOM: {
       char *nm = mod_name[mod_count];
-      if (!custom_module_text(id - M_CUSTOM, dst, sizeof(mod_text[0]), nm,
+      if (!custom_module_text(bar, id - M_CUSTOM, dst, sizeof(mod_text[0]), nm,
                               sizeof(mod_name[0])))
         continue;
       st = &st_custom[id - M_CUSTOM];
@@ -939,7 +994,7 @@ static void draw_bar(Bar *bar) {
     if (id < M_CUSTOM)
       continue;
     char text[256], nm[64];
-    if (!custom_module_text(id - M_CUSTOM, text, sizeof(text), nm,
+    if (!custom_module_text(bar, id - M_CUSTOM, text, sizeof(text), nm,
                             sizeof(nm)))
       continue;
     x = draw_module(bar, nm, -1, text, &st_custom[id - M_CUSTOM], x, y, fg,
@@ -1481,13 +1536,14 @@ static const MangoAction *find_action(const char *module) {
 
 static void handle_module_action(Bar *bar, const char *module, int tag,
                                  uint32_t button) {
-  // Network: left click toggles between interface name and speed
-  if (strcmp(module, "network") == 0 && button == BTN_LEFT) {
-    bar->net_speed_mode = !bar->net_speed_mode;
+  // Left click toggles format-alt when the module defines one.
+  int ai = alt_index(module);
+  if (ai >= 0 && button == BTN_LEFT) {
+    bar->alt_on[ai] = !bar->alt_on[ai];
     bar->redraw = true;
-    sys_refresh = true;
-    IPC_LOG("[click] network toggle speed_mode=%d\n", bar->net_speed_mode);
-    return;
+    IPC_LOG("[click] %s alt=%d\n", module, bar->alt_on[ai]);
+    if (strcmp(module, "network") == 0)
+      sys_refresh = true; // start/refresh speed sampling promptly
   }
   const MangoAction *ma = find_action(module);
   if (!ma)
@@ -2666,8 +2722,9 @@ static void update_network(void) {
 
   Bar *b;
   bool need_speed = false;
+  int nai = alt_index("network");
   wl_list_for_each(b, &bar_list, link) {
-    if (b->net_speed_mode)
+    if (nai >= 0 && b->alt_on[nai])
       need_speed = true;
     snprintf(b->net_ifname, sizeof(b->net_ifname), "%s", ifname);
   }

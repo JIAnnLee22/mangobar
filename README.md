@@ -78,6 +78,11 @@ example.
 automatically. Text, icons and menus are rendered at the effective scale
 so they stay sharp.
 
+Any module with a `format` can also set `format-alt`; a left click toggles
+between the two formats (the module's `on-click` command still runs if
+configured). The network module additionally supports `{down}` / `{up}` in
+its format strings, e.g. `"format-alt": "↓{down} ↑{up}"` for live speeds.
+
 CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 
 ## Modules
