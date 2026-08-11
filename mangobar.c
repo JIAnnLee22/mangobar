@@ -485,11 +485,11 @@ static struct fcft_font *font_for_scale(int scale) {
   return cache[scale];
 }
 
-// Reserve width for three digits so 3% / 30% / 100% keep the module size.
+// Reserve width for two digits so 3% / 30% keep the module size.
 static void ensure_numeric_min_width(ModuleStyle *st, const char *fmt,
                                      const char *icon) {
   char tmp[256];
-  format_value(fmt, "888", icon ? icon : "", tmp, sizeof(tmp));
+  format_value(fmt, "88", icon ? icon : "", tmp, sizeof(tmp));
   int32_t mn, mx;
   uint32_t tw = text_metrics(tmp, &mn, &mx);
   int need = (int)tw + st->pad_l + st->pad_r + st->margin_l + st->margin_r;
