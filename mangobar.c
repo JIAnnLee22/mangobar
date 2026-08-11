@@ -1016,6 +1016,9 @@ static void layer_surface_configure(void *data,
 
 static void layer_surface_closed(void *data,
                                  struct zwlr_layer_surface_v1 *surface) {
+  // Compositor destroyed our surface; leave the event loop.
+  IPC_LOG("[wl] layer surface closed, exiting\n");
+  running = false;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -2797,7 +2800,10 @@ static void event_loop() {
       tv.tv_sec = 0;
       tv.tv_usec = 50000;
     }
-    wl_display_flush(display);
+    if (wl_display_flush(display) < 0 && errno != EAGAIN) {
+      IPC_LOG("[wl] flush failed errno=%d, exiting\n", errno);
+      break;
+    }
 
     int ret = select(maxfd + 1, &rfds, &wfds, NULL, &tv);
     if (ret < 0) {
@@ -2805,8 +2811,12 @@ static void event_loop() {
         continue;
       break;
     }
-    if (FD_ISSET(wl_fd, &rfds))
-      wl_display_dispatch(display);
+    if (FD_ISSET(wl_fd, &rfds)) {
+      if (wl_display_dispatch(display) < 0 && errno != EAGAIN) {
+        IPC_LOG("[wl] dispatch failed errno=%d, exiting\n", errno);
+        break;
+      }
+    }
     if (ipc_fd >= 0 && FD_ISSET(ipc_fd, &rfds)) {
       ssize_t n = read(ipc_fd, ipc_buf + ipc_buf_len,
                        sizeof(ipc_buf) - ipc_buf_len - 1);
