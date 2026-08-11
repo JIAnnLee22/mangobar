@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -1435,7 +1436,7 @@ static void ipc_connect() {
     IPC_LOG("[ipc] connect: MANGO_INSTANCE_SIGNATURE not set\n");
     return;
   }
-  ipc_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  ipc_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (ipc_fd < 0) {
     IPC_LOG("[ipc] connect: socket failed\n");
     return;
@@ -1473,7 +1474,7 @@ static void ipc_send_command(const char *fmt, ...) {
     IPC_LOG("[cmd] no socket path, cmd='%s'\n", buf);
     return;
   }
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     IPC_LOG("[cmd] socket failed, cmd='%s'\n", buf);
     return;
@@ -1513,6 +1514,10 @@ static void run_command(const char *cmd) {
   pid_t pid = fork();
   if (pid == 0) {
     setsid();
+    signal(SIGCHLD, SIG_DFL);
+    signal(SIGPIPE, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
     int devnull = open("/dev/null", O_RDWR);
     if (devnull >= 0) {
       dup2(devnull, 0);
@@ -1521,6 +1526,20 @@ static void run_command(const char *cmd) {
       if (devnull > 2)
         close(devnull);
     }
+    // A Wayland bar must not force X11 toolkits onto spawned GUI apps
+    // (e.g. GDK_BACKEND=x11 makes wlogout/satty fall back to XWayland).
+    if (getenv("WAYLAND_DISPLAY")) {
+      const char *gdk = getenv("GDK_BACKEND");
+      if (gdk && strstr(gdk, "x11") && !strstr(gdk, "wayland"))
+        unsetenv("GDK_BACKEND");
+    }
+    // Don't leak mangobar's sockets/pipes into GUI children.
+#ifdef SYS_close_range
+    syscall(SYS_close_range, 3, ~0U, 0);
+#else
+    for (int fd = 3; fd < 1024; fd++)
+      close(fd);
+#endif
     execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
     _exit(127);
   }
