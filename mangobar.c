@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -1016,9 +1015,9 @@ static void layer_surface_configure(void *data,
 
 static void layer_surface_closed(void *data,
                                  struct zwlr_layer_surface_v1 *surface) {
-  // Compositor destroyed our surface; leave the event loop.
-  IPC_LOG("[wl] layer surface closed, exiting\n");
-  running = false;
+  // The surface can be closed on TTY switches without the compositor
+  // exiting, so only socket failures end the event loop.
+  IPC_LOG("[wl] layer surface closed\n");
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
@@ -2773,51 +2772,69 @@ static void event_loop() {
   int wl_fd = wl_display_get_fd(display);
   while (running) {
     int tray_fd = tray ? tray_get_fd(tray) : -1;
-    fd_set rfds, wfds;
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    FD_SET(wl_fd, &rfds);
-    if (ipc_fd >= 0)
-      FD_SET(ipc_fd, &rfds);
+    struct pollfd fds[3];
+    int nfds = 0, ipc_idx = -1, tray_idx = -1;
+    fds[nfds++] =
+        (struct pollfd){.fd = wl_fd, .events = POLLIN | POLLERR | POLLHUP};
+    if (ipc_fd >= 0) {
+      ipc_idx = nfds;
+      fds[nfds++] = (struct pollfd){.fd = ipc_fd, .events = POLLIN};
+    }
     if (tray_fd >= 0) {
-      // Always poll the bus fd for readability.
-      FD_SET(tray_fd, &rfds);
-      int tev = tray_get_events(tray);
-      if (tev & POLLOUT)
-        FD_SET(tray_fd, &wfds);
+      tray_idx = nfds;
+      short tev = tray_get_events(tray);
+      fds[nfds++] = (struct pollfd){.fd = tray_fd,
+                                    .events = (short)(POLLIN | tev)};
     }
-    int maxfd = wl_fd;
-    if (ipc_fd > maxfd)
-      maxfd = ipc_fd;
-    if (tray_fd > maxfd)
-      maxfd = tray_fd;
     // Short timeout while refreshing or the menu is open.
-    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-    if (sys_refresh) {
-      tv.tv_sec = 0;
-      tv.tv_usec = 100000;
-    } else if (popup.open) {
-      tv.tv_sec = 0;
-      tv.tv_usec = 50000;
-    }
-    if (wl_display_flush(display) < 0 && errno != EAGAIN) {
-      IPC_LOG("[wl] flush failed errno=%d, exiting\n", errno);
-      break;
-    }
+    int timeout = 1000;
+    if (sys_refresh)
+      timeout = 100;
+    else if (popup.open)
+      timeout = 50;
 
-    int ret = select(maxfd + 1, &rfds, &wfds, NULL, &tv);
-    if (ret < 0) {
-      if (errno == EINTR)
-        continue;
-      break;
-    }
-    if (FD_ISSET(wl_fd, &rfds)) {
-      if (wl_display_dispatch(display) < 0 && errno != EAGAIN) {
-        IPC_LOG("[wl] dispatch failed errno=%d, exiting\n", errno);
+    // Canonical libwayland read pattern: prepare, poll, read, dispatch.
+    // Exit only when the compositor socket is gone (POLLHUP/POLLERR or a
+    // failed read), not when a layer surface is closed (e.g. TTY switch).
+    int prep = wl_display_prepare_read(display);
+    if (prep != 0) {
+      if (wl_display_dispatch_pending(display) < 0) {
+        IPC_LOG("[wl] dispatch failed, exiting\n");
         break;
       }
+    } else {
+      if (wl_display_flush(display) < 0 && errno != EAGAIN) {
+        wl_display_cancel_read(display);
+        IPC_LOG("[wl] flush failed errno=%d, exiting\n", errno);
+        break;
+      }
+      int ret = poll(fds, (nfds_t)nfds, timeout);
+      if (ret < 0) {
+        if (errno == EINTR) {
+          wl_display_cancel_read(display);
+          continue;
+        }
+        break;
+      }
+      if (fds[0].revents & (POLLERR | POLLHUP)) {
+        wl_display_cancel_read(display);
+        IPC_LOG("[wl] compositor exited, exiting\n");
+        break;
+      }
+      if (fds[0].revents & POLLIN) {
+        if (wl_display_read_events(display) < 0) {
+          IPC_LOG("[wl] read failed, exiting\n");
+          break;
+        }
+        if (wl_display_dispatch_pending(display) < 0) {
+          IPC_LOG("[wl] dispatch failed, exiting\n");
+          break;
+        }
+      } else {
+        wl_display_cancel_read(display);
+      }
     }
-    if (ipc_fd >= 0 && FD_ISSET(ipc_fd, &rfds)) {
+    if (ipc_idx >= 0 && (fds[ipc_idx].revents & POLLIN)) {
       ssize_t n = read(ipc_fd, ipc_buf + ipc_buf_len,
                        sizeof(ipc_buf) - ipc_buf_len - 1);
       if (n > 0) {
@@ -2832,8 +2849,7 @@ static void event_loop() {
         ipc_buf_len = 0;
       }
     }
-    if (tray_fd >= 0 &&
-        (FD_ISSET(tray_fd, &rfds) || FD_ISSET(tray_fd, &wfds))) {
+    if (tray_idx >= 0 && (fds[tray_idx].revents & (POLLIN | POLLOUT))) {
       tray_dispatch(tray);
     }
     if (sys_refresh) {
