@@ -303,6 +303,7 @@ typedef struct {
   bool configured;
   int scale;          // effective buffer scale for this output
   uint32_t logical_w, logical_h; // logical surface size
+  int tag_count;      // max tag number reported by the WM for this output
   uint32_t width, height;
   uint32_t stride, bufsize;
   uint32_t mtags, ctags, urg, sel;
@@ -901,7 +902,7 @@ static void draw_bar(Bar *bar) {
         x = draw_module(bar, "tags", -1, g_cfg.overview_label, &st_overview, x,
                         y, fg, fg_mask, bg, left_max, bar_h);
     } else {
-      for (int i = 0; i < g_cfg.tag_count; i++) {
+      for (int i = 0; i < bar->tag_count; i++) {
         if (x >= left_max)
           break;
         if (g_cfg.only_occupied &&
@@ -1197,6 +1198,7 @@ static void registry_global(void *data, struct wl_registry *registry,
         zxdg_output_manager_v1_get_xdg_output(output_manager, bar->wl_output);
     zxdg_output_v1_add_listener(bar->xdg_output, &output_listener, bar);
     bar->scale = g_cfg.buffer_scale > 0 ? g_cfg.buffer_scale : 1;
+    bar->tag_count = g_cfg.tag_count;
     bar->height = (bar_h + bar_top) * (uint32_t)bar->scale;
     bar->wl_surface = wl_compositor_create_surface(compositor);
     bar->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
@@ -1239,6 +1241,11 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     bar->sel = cJSON_IsTrue(item);
   if ((item = cJSON_GetObjectItem(json, "layout_symbol")))
     strncpy(bar->layout, item->valuestring, sizeof(bar->layout) - 1);
+  if ((item = cJSON_GetObjectItem(json, "tag_num")) && cJSON_IsNumber(item)) {
+    int n = item->valueint;
+    if (n >= 1 && n <= MANGOBAR_MAX_TAGS)
+      bar->tag_count = n;
+  }
 
   cJSON *client = cJSON_GetObjectItem(json, "active_client");
   if (client && !cJSON_IsNull(client)) {
@@ -1260,7 +1267,7 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     cJSON *tobj;
     cJSON_ArrayForEach(tobj, tags) {
       int idx = cJSON_GetObjectItem(tobj, "index")->valueint - 1;
-      if (idx < 0 || idx >= g_cfg.tag_count)
+      if (idx < 0 || idx >= bar->tag_count)
         continue;
       if (cJSON_IsTrue(cJSON_GetObjectItem(tobj, "is_active")))
         bar->mtags |= 1 << idx;
@@ -1283,7 +1290,7 @@ static void update_bar_json(Bar *bar, cJSON *json) {
         bar->overview_mode = true;
       } else {
         int idx = item0->valueint - 1;
-        if (idx >= 0 && idx < g_cfg.tag_count)
+        if (idx >= 0 && idx < bar->tag_count)
           bar->atags |= (1 << idx);
       }
     } else {
@@ -1291,7 +1298,7 @@ static void update_bar_json(Bar *bar, cJSON *json) {
       cJSON_ArrayForEach(elem, active_tags) {
         if (cJSON_IsNumber(elem)) {
           int idx = elem->valueint - 1;
-          if (idx >= 0 && idx < g_cfg.tag_count)
+          if (idx >= 0 && idx < bar->tag_count)
             bar->atags |= (1 << idx);
         }
       }
