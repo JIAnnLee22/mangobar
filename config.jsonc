@@ -1,3 +1,4 @@
+// mangobar config (JSONC).
 {
     "layer": "top",
     "height": 30,

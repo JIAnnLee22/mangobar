@@ -485,6 +485,18 @@ static struct fcft_font *font_for_scale(int scale) {
   return cache[scale];
 }
 
+// Reserve width for three digits so 3% / 30% / 100% keep the module size.
+static void ensure_numeric_min_width(ModuleStyle *st, const char *fmt,
+                                     const char *icon) {
+  char tmp[256];
+  format_value(fmt, "888", icon ? icon : "", tmp, sizeof(tmp));
+  int32_t mn, mx;
+  uint32_t tw = text_metrics(tmp, &mn, &mx);
+  int need = (int)tw + st->pad_l + st->pad_r + st->margin_l + st->margin_r;
+  if (need > st->min_width)
+    st->min_width = need;
+}
+
 static uint32_t draw_text(const char *text, uint32_t x, uint32_t y,
                           pixman_image_t *fg, pixman_image_t *fg_mask,
                           pixman_image_t *bg, pixman_color_t *fg_color,
@@ -758,17 +770,20 @@ static void draw_bar(Bar *bar) {
       format_int(g_cfg.cpu_format, bar->cpu_pct, "", dst, sizeof(mod_text[0]));
       st = &st_cpu;
       mname = "cpu";
+      ensure_numeric_min_width(st, g_cfg.cpu_format, "");
       break;
     case M_RIGHT_MEM:
       format_int(g_cfg.mem_format, bar->mem_pct, "", dst, sizeof(mod_text[0]));
       st = &st_mem;
       mname = "mem";
+      ensure_numeric_min_width(st, g_cfg.mem_format, "");
       break;
     case M_RIGHT_BRIGHTNESS:
       format_int(g_cfg.brightness_fmt, bar->brightness_pct, "☀", dst,
                  sizeof(mod_text[0]));
       st = &st_brightness;
       mname = "brightness";
+      ensure_numeric_min_width(st, g_cfg.brightness_fmt, "☀");
       break;
     case M_RIGHT_VOLUME:
       if (bar->volume_muted)
@@ -779,6 +794,8 @@ static void draw_bar(Bar *bar) {
                    sizeof(mod_text[0]));
       st = &st_volume;
       mname = "volume";
+      ensure_numeric_min_width(st, g_cfg.volume_fmt, "");
+      ensure_numeric_min_width(st, g_cfg.volume_fmt_muted, "🔇");
       break;
     case M_RIGHT_CLOCK_TIME:
       strftime(dst, sizeof(mod_text[0]), g_cfg.clock_time_format, tm);
