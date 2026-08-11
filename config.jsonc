@@ -6,14 +6,16 @@
     "font": "Maple Mono NF CN:style=Bold:size=24",
 
     "modules-left": [
-        "mango/workspaces",
-        "mango/layout",
-        "mango/window"
+        "workspaces",
+        "layout",
+        "window"
     ],
     "modules-center": [],
     "modules-right": [
         "tray",
         "network",
+        "keymode",
+        "keyboardlayout",
         "cpu",
         "memory",
         "pulseaudio",
@@ -23,16 +25,16 @@
         "custom/power"
     ],
 
-    "mango/workspaces": {
+    "workspaces": {
         "hide-empty": true,
         "overview-label": "OVERVIEW",
         "on-click": "activate",
         "on-click-right": "toggle"
     },
-    "mango/layout": {
+    "layout": {
         "format": "{}"
     },
-    "mango/window": {
+    "window": {
         "format": "{}",
         "on-click": "bash ~/.config/mango/scripts/screenshot.sh",
         "on-click-right": "python /home/wrq/tool/ocr.py"

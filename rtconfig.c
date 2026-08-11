@@ -105,9 +105,12 @@ static int right_module_id(const char *name) {
     return M_RIGHT_CLOCK_TIME;
   if (strcmp(name, "clock#date") == 0)
     return M_RIGHT_CLOCK_DATE;
-  if (strcmp(name, "mango/keymode") == 0)
+  if (strcmp(name, "keymode") == 0 || strcmp(name, "mango/keymode") == 0)
     return M_RIGHT_KEYMODE;
-  if (strcmp(name, "mango/language") == 0)
+  if (strcmp(name, "keyboardlayout") == 0 ||
+      strcmp(name, "keyboard-layout") == 0 ||
+      strcmp(name, "mango/language") == 0 ||
+      strcmp(name, "language") == 0)
     return M_RIGHT_KBLAYOUT;
   if (strcmp(name, "network") == 0)
     return M_RIGHT_NETWORK;
@@ -236,11 +239,14 @@ static void parse_modules(cJSON *root) {
       if (!cJSON_IsString(item))
         continue;
       const char *name = item->valuestring;
-      if (strcmp(name, "mango/workspaces") == 0)
+      if (strcmp(name, "workspaces") == 0 ||
+          strcmp(name, "mango/workspaces") == 0)
         g_cfg.enable_tags = true;
-      else if (strcmp(name, "mango/layout") == 0)
+      else if (strcmp(name, "layout") == 0 ||
+               strcmp(name, "mango/layout") == 0)
         g_cfg.enable_layout = true;
-      else if (strcmp(name, "mango/window") == 0)
+      else if (strcmp(name, "window") == 0 ||
+               strcmp(name, "mango/window") == 0)
         g_cfg.enable_title = true;
       else if (strncmp(name, "custom/", 7) == 0 &&
                g_cfg.left_count < MANGOBAR_MAX_RIGHT_MODULES) {
@@ -254,7 +260,9 @@ static void parse_modules(cJSON *root) {
   arr = cJSON_GetObjectItemCaseSensitive(root, "modules-center");
   if (cJSON_IsArray(arr)) {
     cJSON_ArrayForEach(item, arr) {
-      if (cJSON_IsString(item) && strcmp(item->valuestring, "mango/window") == 0)
+      if (cJSON_IsString(item) &&
+          (strcmp(item->valuestring, "window") == 0 ||
+           strcmp(item->valuestring, "mango/window") == 0))
         g_cfg.enable_title = true;
     }
   }
@@ -325,7 +333,9 @@ static void parse_module_configs(cJSON *root) {
       parse_custom_module(child, child->string + 7);
   }
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "mango/workspaces");
+  m = cJSON_GetObjectItemCaseSensitive(root, "workspaces");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "mango/workspaces");
   if (cJSON_IsObject(m)) {
     g_cfg.only_occupied = cfg_bool(m, "hide-empty", true);
     cfg_str(m, "overview-label", g_cfg.overview_label,
@@ -342,11 +352,15 @@ static void parse_module_configs(cJSON *root) {
                NULL, NULL);
   }
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "mango/layout");
+  m = cJSON_GetObjectItemCaseSensitive(root, "layout");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "mango/layout");
   if (cJSON_IsObject(m))
     cfg_str(m, "format", g_cfg.layout_format, sizeof(g_cfg.layout_format));
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "mango/window");
+  m = cJSON_GetObjectItemCaseSensitive(root, "window");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "mango/window");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.title_format, sizeof(g_cfg.title_format));
     set_action(
@@ -363,11 +377,17 @@ static void parse_module_configs(cJSON *root) {
         NULL, NULL);
   }
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "mango/keymode");
+  m = cJSON_GetObjectItemCaseSensitive(root, "keymode");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "mango/keymode");
   if (cJSON_IsObject(m))
     cfg_str(m, "format", g_cfg.keymode_format, sizeof(g_cfg.keymode_format));
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "mango/language");
+  m = cJSON_GetObjectItemCaseSensitive(root, "keyboardlayout");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "language");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "mango/language");
   if (cJSON_IsObject(m))
     cfg_str(m, "format", g_cfg.keyboardlayout_format,
             sizeof(g_cfg.keyboardlayout_format));
