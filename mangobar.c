@@ -196,8 +196,9 @@ static uint32_t bar_right; // content offset from right (CSS margin-right)
 // ---------- Format helpers ----------
 static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x);
 
-static void format_value(const char *fmt, const char *value, const char *icon,
-                         char *out, size_t outsz) {
+static void format_value_full(const char *fmt, const char *value,
+                              const char *load, const char *icon, char *out,
+                              size_t outsz) {
   if (!fmt || !*fmt) {
     snprintf(out, outsz, "%s", value ? value : "");
     return;
@@ -214,7 +215,9 @@ static void format_value(const char *fmt, const char *value, const char *icon,
         o += snprintf(out + o, outsz - o, "%s", value);
       p += 9;
     } else if (strncmp(p, "{load}", 6) == 0) {
-      if (value)
+      if (load)
+        o += snprintf(out + o, outsz - o, "%s", load);
+      else if (value)
         o += snprintf(out + o, outsz - o, "%s", value);
       p += 6;
     } else if (strncmp(p, "{usage}", 7) == 0) {
@@ -246,6 +249,11 @@ static void format_value(const char *fmt, const char *value, const char *icon,
     }
   }
   out[o] = '\0';
+}
+
+static void format_value(const char *fmt, const char *value, const char *icon,
+                         char *out, size_t outsz) {
+  format_value_full(fmt, value, NULL, icon, out, outsz);
 }
 
 static void format_int(const char *fmt, int value, const char *icon, char *out,
@@ -341,6 +349,7 @@ typedef struct {
   char keymode[32];
   char kb_layout[16];
   int cpu_pct, mem_pct;
+  double cpu_load;
   int brightness_pct, volume_pct;
   bool volume_muted;
   char time_str[16];
@@ -825,8 +834,14 @@ static void draw_bar(Bar *bar) {
     char *dst = mod_text[mod_count];
     switch (id) {
     case M_RIGHT_CPU:
-      format_int(module_fmt("cpu", g_cfg.cpu_format, bar), bar->cpu_pct, "",
-                 dst, sizeof(mod_text[0]));
+      {
+        char usagestr[16];
+        char loadstr[32];
+        snprintf(usagestr, sizeof(usagestr), "%d", bar->cpu_pct);
+        snprintf(loadstr, sizeof(loadstr), "%.2f", bar->cpu_load);
+        format_value_full(module_fmt("cpu", g_cfg.cpu_format, bar), usagestr,
+                          loadstr, "", dst, sizeof(mod_text[0]));
+      }
       st = &st_cpu;
       mname = "cpu";
       ensure_numeric_min_width(st, module_fmt("cpu", g_cfg.cpu_format, bar),
@@ -2662,6 +2677,7 @@ static const struct wl_pointer_listener pointer_listener = {
 
 // ---------- System info (CPU / mem / backlight / volume / time) ----------
 static int cpu_prev_total, cpu_prev_idle;
+static uint64_t last_cpu_ms;
 
 static void update_brightness() {
   static char dev[64];
@@ -3002,27 +3018,45 @@ static void update_volume() {
 }
 
 static void update_system_info() {
-  FILE *f = fopen("/proc/stat", "r");
-  if (f) {
-    char cpu[8];
-    int user, nice, system, idle;
-    if (fscanf(f, "%s %d %d %d %d", cpu, &user, &nice, &system, &idle) == 5) {
-      int total = user + nice + system + idle;
-      int pct = 0;
-      if (cpu_prev_total) {
-        int total_d = total - cpu_prev_total;
-        int idle_d = idle - cpu_prev_idle;
-        if (total_d)
-          pct = 100 * (total_d - idle_d) / total_d;
+  uint64_t ms = now_ms();
+  // CPU percentage is a rate; skip sampling on very short windows so
+  // scroll-triggered immediate refreshes don't produce noisy spikes.
+  if (ms - last_cpu_ms >= 500) {
+    last_cpu_ms = ms;
+    FILE *f = fopen("/proc/stat", "r");
+    if (f) {
+      char cpu[8];
+      int user, nice, system, idle;
+      if (fscanf(f, "%s %d %d %d %d", cpu, &user, &nice, &system, &idle) ==
+          5) {
+        int total = user + nice + system + idle;
+        int pct = 0;
+        if (cpu_prev_total) {
+          int total_d = total - cpu_prev_total;
+          int idle_d = idle - cpu_prev_idle;
+          if (total_d)
+            pct = 100 * (total_d - idle_d) / total_d;
+        }
+        cpu_prev_total = total;
+        cpu_prev_idle = idle;
+        Bar *b;
+        wl_list_for_each(b, &bar_list, link) b->cpu_pct = pct;
       }
-      cpu_prev_total = total;
-      cpu_prev_idle = idle;
-      Bar *b;
-      wl_list_for_each(b, &bar_list, link) b->cpu_pct = pct;
+      fclose(f);
     }
-    fclose(f);
+    FILE *lf = fopen("/proc/loadavg", "r");
+    if (lf) {
+      double load1 = 0;
+      if (fscanf(lf, "%lf", &load1) == 1) {
+        // Round up to two decimals, matching loadavg's usual display.
+        load1 = ceil(load1 * 100.0) / 100.0;
+        Bar *b;
+        wl_list_for_each(b, &bar_list, link) b->cpu_load = load1;
+      }
+      fclose(lf);
+    }
   }
-  f = fopen("/proc/meminfo", "r");
+  FILE *f = fopen("/proc/meminfo", "r");
   if (f) {
     long total = 0, avail = 0;
     char line[128];

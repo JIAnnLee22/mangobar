@@ -88,7 +88,8 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 ## Modules
 
 - `tags` / `layout` / `title` / `keymode` / `keyboardlayout`: from mangowm IPC
-- `cpu` / `mem`: read `/proc`
+- `cpu`: `{usage}` is the CPU usage percent and `{load}` is the 1-minute
+  load average (two decimals); `mem` reads `/proc`
 - `brightness`: read `/sys/class/backlight` (auto-detected or the JSONC
   `device` field); updates immediately on external changes via udev
 - `volume`: read via the PulseAudio library, with ALSA fallback; shows mute
