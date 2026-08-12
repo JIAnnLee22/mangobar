@@ -90,31 +90,41 @@ static void cfg_str(cJSON *obj, const char *key, char *dst, size_t sz) {
     cfg_set(dst, sz, v->valuestring);
 }
 
-static int right_module_id(const char *name) {
+static int module_id(const char *name) {
   if (!name)
-    return M_RIGHT_NONE;
+    return M_NONE;
+  if (strcmp(name, "workspaces") == 0 || strcmp(name, "mango/workspaces") == 0)
+    return M_TAGS;
+  if (strcmp(name, "layout") == 0 || strcmp(name, "mango/layout") == 0)
+    return M_LAYOUT;
+  if (strcmp(name, "window") == 0 || strcmp(name, "mango/window") == 0)
+    return M_TITLE;
+  if (strcmp(name, "tray") == 0)
+    return M_TRAY;
   if (strcmp(name, "cpu") == 0)
-    return M_RIGHT_CPU;
+    return M_CPU;
   if (strcmp(name, "memory") == 0)
-    return M_RIGHT_MEM;
+    return M_MEM;
   if (strcmp(name, "backlight") == 0)
-    return M_RIGHT_BRIGHTNESS;
+    return M_BRIGHTNESS;
   if (strcmp(name, "pulseaudio") == 0)
-    return M_RIGHT_VOLUME;
+    return M_VOLUME;
   if (strcmp(name, "clock") == 0 || strcmp(name, "clock#time") == 0)
-    return M_RIGHT_CLOCK_TIME;
+    return M_CLOCK_TIME;
   if (strcmp(name, "clock#date") == 0)
-    return M_RIGHT_CLOCK_DATE;
+    return M_CLOCK_DATE;
   if (strcmp(name, "keymode") == 0 || strcmp(name, "mango/keymode") == 0)
-    return M_RIGHT_KEYMODE;
+    return M_KEYMODE;
   if (strcmp(name, "keyboardlayout") == 0 ||
       strcmp(name, "keyboard-layout") == 0 ||
       strcmp(name, "mango/language") == 0 ||
       strcmp(name, "language") == 0)
-    return M_RIGHT_KBLAYOUT;
+    return M_KBLAYOUT;
   if (strcmp(name, "network") == 0)
-    return M_RIGHT_NETWORK;
-  return M_RIGHT_NONE;
+    return M_NETWORK;
+  if (strcmp(name, "hide_clients") == 0 || strcmp(name, "hideclients") == 0)
+    return M_HIDE_CLIENTS;
+  return M_NONE;
 }
 
 // Convert {:L%H:%M} time format to strftime
@@ -244,104 +254,46 @@ static const char *map_workspace_action(const char *a) {
   return a;
 }
 
-static void parse_modules(cJSON *root) {
-  cJSON *arr;
+static void add_module(int *order, int *count, int id) {
+  if (*count < MANGOBAR_MAX_MODULES)
+    order[(*count)++] = id;
+}
+
+static void parse_module_list(cJSON *root, const char *key, int *order,
+                              int *count) {
+  cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, key);
+  if (!cJSON_IsArray(arr))
+    return;
   cJSON *item;
+  cJSON_ArrayForEach(item, arr) {
+    if (!cJSON_IsString(item))
+      continue;
+    const char *name = item->valuestring;
+    if (strncmp(name, "custom/", 7) == 0) {
+      MangoCustomModule *cm = find_custom(name + 7);
+      if (cm)
+        add_module(order, count, M_CUSTOM + (cm - g_cfg.customs));
+      continue;
+    }
+    int id = module_id(name);
+    if (id == M_NONE)
+      continue;
+    if (id == M_TRAY) {
+      g_cfg.enable_tray = true;
+      continue; // tray is always drawn on the right
+    }
+    add_module(order, count, id);
+  }
+}
 
-  g_cfg.enable_tags = g_cfg.enable_layout = g_cfg.enable_title = false;
-  g_cfg.enable_cpu = g_cfg.enable_mem = g_cfg.enable_clock = false;
-  g_cfg.enable_brightness = g_cfg.enable_volume = false;
-  g_cfg.enable_keymode = g_cfg.enable_keyboardlayout = false;
+static void parse_modules(cJSON *root) {
   g_cfg.enable_tray = false;
-  g_cfg.right_count = 0;
-  g_cfg.left_count = 0;
-
-  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-left");
-  if (cJSON_IsArray(arr)) {
-    cJSON_ArrayForEach(item, arr) {
-      if (!cJSON_IsString(item))
-        continue;
-      const char *name = item->valuestring;
-      if (strcmp(name, "workspaces") == 0 ||
-          strcmp(name, "mango/workspaces") == 0)
-        g_cfg.enable_tags = true;
-      else if (strcmp(name, "layout") == 0 ||
-               strcmp(name, "mango/layout") == 0)
-        g_cfg.enable_layout = true;
-      else if (strcmp(name, "window") == 0 ||
-               strcmp(name, "mango/window") == 0)
-        g_cfg.enable_title = true;
-      else if (strncmp(name, "custom/", 7) == 0 &&
-               g_cfg.left_count < MANGOBAR_MAX_RIGHT_MODULES) {
-        MangoCustomModule *cm = find_custom(name + 7);
-        if (cm)
-          g_cfg.left_order[g_cfg.left_count++] = M_CUSTOM + (cm - g_cfg.customs);
-      }
-    }
-  }
-
-  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-center");
-  if (cJSON_IsArray(arr)) {
-    cJSON_ArrayForEach(item, arr) {
-      if (cJSON_IsString(item) &&
-          (strcmp(item->valuestring, "window") == 0 ||
-           strcmp(item->valuestring, "mango/window") == 0))
-        g_cfg.enable_title = true;
-    }
-  }
-
-  g_cfg.right_count = 0;
-  arr = cJSON_GetObjectItemCaseSensitive(root, "modules-right");
-  if (cJSON_IsArray(arr)) {
-    cJSON_ArrayForEach(item, arr) {
-      if (!cJSON_IsString(item))
-        continue;
-      const char *name = item->valuestring;
-      if (strcmp(name, "tray") == 0) {
-        g_cfg.enable_tray = true;
-        continue; // tray is always drawn on the right
-      }
-      if (strncmp(name, "custom/", 7) == 0 &&
-          g_cfg.right_count < MANGOBAR_MAX_RIGHT_MODULES) {
-        MangoCustomModule *cm = find_custom(name + 7);
-        if (cm)
-          g_cfg.right_order[g_cfg.right_count++] = M_CUSTOM + (cm - g_cfg.customs);
-        continue;
-      }
-      int id = right_module_id(name);
-      if (id != M_RIGHT_NONE && g_cfg.right_count < MANGOBAR_MAX_RIGHT_MODULES) {
-        g_cfg.right_order[g_cfg.right_count++] = id;
-        switch (id) {
-        case M_RIGHT_CPU:
-          g_cfg.enable_cpu = true;
-          break;
-        case M_RIGHT_MEM:
-          g_cfg.enable_mem = true;
-          break;
-        case M_RIGHT_BRIGHTNESS:
-          g_cfg.enable_brightness = true;
-          break;
-        case M_RIGHT_VOLUME:
-          g_cfg.enable_volume = true;
-          break;
-        case M_RIGHT_CLOCK_TIME:
-        case M_RIGHT_CLOCK_DATE:
-          g_cfg.enable_clock = true;
-          break;
-        case M_RIGHT_KEYMODE:
-          g_cfg.enable_keymode = true;
-          break;
-        case M_RIGHT_KBLAYOUT:
-          g_cfg.enable_keyboardlayout = true;
-          break;
-        case M_RIGHT_NETWORK:
-          break;
-        default:
-          break;
-        }
-      }
-    }
-  }
+  g_cfg.left_count = g_cfg.center_count = g_cfg.right_count = 0;
+  parse_module_list(root, "modules-left", g_cfg.left_order, &g_cfg.left_count);
+  parse_module_list(root, "modules-center", g_cfg.center_order,
+                    &g_cfg.center_count);
+  parse_module_list(root, "modules-right", g_cfg.right_order,
+                    &g_cfg.right_count);
 }
 
 static void parse_module_configs(cJSON *root) {
@@ -532,6 +484,21 @@ static void parse_module_configs(cJSON *root) {
     cfg_str(m, "format", g_cfg.network_format, sizeof(g_cfg.network_format));
     cfg_alt(m, "network");
   }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "hideclients");
+  if (!cJSON_IsObject(m))
+    m = cJSON_GetObjectItemCaseSensitive(root, "hide_clients");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.hide_clients_format,
+            sizeof(g_cfg.hide_clients_format));
+    cfg_alt(m, "hideclients");
+    set_action("hideclients",
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
 }
 
 void mango_config_defaults(void) {
@@ -549,16 +516,6 @@ void mango_config_defaults(void) {
     snprintf(g_cfg.tag_names[i], sizeof(g_cfg.tag_names[i]), "%d", i + 1);
   snprintf(g_cfg.overview_label, sizeof(g_cfg.overview_label), "%s",
            "OVERVIEW");
-  g_cfg.enable_tags = true;
-  g_cfg.enable_layout = true;
-  g_cfg.enable_title = true;
-  g_cfg.enable_cpu = true;
-  g_cfg.enable_mem = true;
-  g_cfg.enable_clock = true;
-  g_cfg.enable_brightness = true;
-  g_cfg.enable_volume = true;
-  g_cfg.enable_keymode = false;
-  g_cfg.enable_keyboardlayout = false;
   g_cfg.enable_tray = true;
   g_cfg.only_occupied = true;
   snprintf(g_cfg.separator, sizeof(g_cfg.separator), "%s", " | ");
@@ -588,25 +545,21 @@ void mango_config_defaults(void) {
            "%s", "{}");
   snprintf(g_cfg.network_format, sizeof(g_cfg.network_format), "%s",
            "{ifname}");
+  snprintf(g_cfg.hide_clients_format, sizeof(g_cfg.hide_clients_format), "%s",
+           "{}");
   add_action("tags", "@view", NULL, NULL, NULL, NULL);
   add_action("volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
   add_action("brightness", NULL, NULL, NULL, "brightnessctl s +5%",
              "brightnessctl s 5%-");
-  // Default right-module order
-  if (g_cfg.enable_keymode)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_KEYMODE;
-  if (g_cfg.enable_keyboardlayout)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_KBLAYOUT;
-  if (g_cfg.enable_cpu)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_CPU;
-  if (g_cfg.enable_mem)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_MEM;
-  if (g_cfg.enable_brightness)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_BRIGHTNESS;
-  if (g_cfg.enable_volume)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_VOLUME;
-  if (g_cfg.enable_clock)
-    g_cfg.right_order[g_cfg.right_count++] = M_RIGHT_CLOCK_TIME;
+  // Default module layout
+  g_cfg.left_order[g_cfg.left_count++] = M_TAGS;
+  g_cfg.left_order[g_cfg.left_count++] = M_LAYOUT;
+  g_cfg.center_order[g_cfg.center_count++] = M_TITLE;
+  g_cfg.right_order[g_cfg.right_count++] = M_CPU;
+  g_cfg.right_order[g_cfg.right_count++] = M_MEM;
+  g_cfg.right_order[g_cfg.right_count++] = M_BRIGHTNESS;
+  g_cfg.right_order[g_cfg.right_count++] = M_VOLUME;
+  g_cfg.right_order[g_cfg.right_count++] = M_CLOCK_TIME;
   g_cfg.css_path[0] = '\0';
 }
 

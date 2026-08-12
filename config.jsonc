@@ -8,14 +8,15 @@
     "modules-left": [
         "workspaces",
         "layout",
+        "hideclients",
         "window"
     ],
     "modules-center": [],
     "modules-right": [
         "tray",
         "network",
-        "keymode",
-        "keyboardlayout",
+        // "keymode",
+        // "keyboardlayout",
         "cpu",
         "memory",
         "pulseaudio",
@@ -43,6 +44,9 @@
     "network": {
         "format": "󰈀 {ifname}",
         "format-alt": "↓{down} ↑{up}"
+    },
+    "hideclients": {
+        "format": " {}"
     },
     "cpu": {
         "format": " {load}%"

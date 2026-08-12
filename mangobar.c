@@ -72,6 +72,8 @@ static const uint32_t keymode_fg_color_hex = 0xC68A93FF;
 static const uint32_t keymode_bg_color_hex = 0x201B14FF;
 static const uint32_t keyboardlayout_fg_color_hex = 0xC68A93FF;
 static const uint32_t keyboardlayout_bg_color_hex = 0x201B14FF;
+static const uint32_t hide_clients_fg_color_hex = 0xC68A93FF;
+static const uint32_t hide_clients_bg_color_hex = 0x201B14FF;
 static const uint32_t tray_fg_color_hex = 0xFFFFFFFF;
 static const uint32_t tray_bg_color_hex = 0x201B14FF;
 static const uint32_t overview_fg_color_hex = 0x111012FF;
@@ -180,7 +182,7 @@ typedef struct {
 // Tag states: 0=active 1=occupied 2=urgent 3=empty 4=inactive
 static ModuleStyle st_tags[5];
 static ModuleStyle st_layout, st_title, st_clock, st_clock_date, st_cpu, st_mem;
-static ModuleStyle st_network;
+static ModuleStyle st_network, st_hide_clients;
 static ModuleStyle st_brightness, st_volume;
 static ModuleStyle st_keymode, st_keyboardlayout;
 static ModuleStyle st_custom[MANGOBAR_MAX_CUSTOM];
@@ -293,24 +295,6 @@ static void format_network_alt(const char *fmt, const char *ifname,
   format_value(tmp, ifname, "", out, outsz);
 }
 
-// Truncate text to available width (with "..."), for window etc.
-static void fit_text_width(const char *text, char *out, size_t outsz,
-                           uint32_t avail, uint32_t pads) {
-  char tmp[256];
-  int maxc = 256;
-  while (maxc > 0) {
-    truncate_utf8_string(tmp, text, sizeof(tmp), maxc);
-    int32_t mn, mx;
-    uint32_t tw = text_metrics(tmp, &mn, &mx);
-    if (tw + pads + 16 <= avail || maxc <= 1) {
-      snprintf(out, outsz, "%s", tmp);
-      return;
-    }
-    maxc -= 8;
-  }
-  out[0] = '\0';
-}
-
 // ---------- Bar ----------
 #define MAX_HOTSPOTS 64
 #define MAX_TRAY_HOTSPOTS 16
@@ -350,6 +334,7 @@ typedef struct {
   char kb_layout[16];
   int cpu_pct, mem_pct;
   double cpu_load;
+  int hideclients;
   int brightness_pct, volume_pct;
   bool volume_muted;
   char time_str[16];
@@ -752,6 +737,203 @@ static void draw_tray_icon(pixman_image_t *dst, pixman_image_t *icon,
   pixman_image_unref(scaled);
 }
 
+#define MAX_MODULE_ENTRIES 64
+
+typedef struct {
+  const char *text;
+  ModuleStyle *st;
+  const char *module;
+  int tag;
+} ModuleEntry;
+
+// Fill entries for one module id; returns the number of entries added.
+static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
+                                 char (*texts)[256], char (*names)[96],
+                                 int *text_n, int *name_n) {
+  int n = 0;
+  char *dst;
+  time_t now = time(NULL);
+  struct tm *tm = localtime(&now);
+  switch (id) {
+  case M_TAGS:
+    if (bar->overview_mode) {
+      if (max > 0)
+        ents[n++] = (ModuleEntry){g_cfg.overview_label, &st_overview, "tags",
+                                  -1};
+    } else {
+      for (int i = 0; i < bar->tag_count && n < max; i++) {
+        if (g_cfg.only_occupied && !(bar->ctags & (1 << i)) &&
+            !(bar->atags & (1 << i)))
+          continue;
+        ModuleStyle *st;
+        if (bar->urg & (1 << i))
+          st = &st_tags[2];
+        else if (bar->mtags & (1 << i))
+          st = &st_tags[0];
+        else if (bar->ctags & (1 << i))
+          st = &st_tags[1];
+        else
+          st = &st_tags[3];
+        ents[n++] = (ModuleEntry){g_cfg.tag_names[i], st, "tags", i};
+      }
+    }
+    break;
+  case M_LAYOUT:
+    dst = texts[(*text_n)++];
+    format_value(g_cfg.layout_format, bar->layout, "", dst, 256);
+    ents[n++] = (ModuleEntry){dst, &st_layout, "layout", -1};
+    break;
+  case M_TITLE:
+    if (bar->title[0]) {
+      dst = texts[(*text_n)++];
+      format_value(g_cfg.title_format, bar->title, "", dst, 256);
+      ents[n++] = (ModuleEntry){dst, &st_title, "title", -1};
+    }
+    break;
+  case M_CPU:
+    {
+      char usagestr[16];
+      char loadstr[32];
+      snprintf(usagestr, sizeof(usagestr), "%d", bar->cpu_pct);
+      snprintf(loadstr, sizeof(loadstr), "%.2f", bar->cpu_load);
+      dst = texts[(*text_n)++];
+      format_value_full(module_fmt("cpu", g_cfg.cpu_format, bar), usagestr,
+                        loadstr, "", dst, 256);
+      ents[n++] = (ModuleEntry){dst, &st_cpu, "cpu", -1};
+      ensure_numeric_min_width(&st_cpu, module_fmt("cpu", g_cfg.cpu_format, bar),
+                               "");
+    }
+    break;
+  case M_MEM:
+    dst = texts[(*text_n)++];
+    format_int(module_fmt("mem", g_cfg.mem_format, bar), bar->mem_pct, "", dst,
+               256);
+    ents[n++] = (ModuleEntry){dst, &st_mem, "mem", -1};
+    ensure_numeric_min_width(&st_mem, module_fmt("mem", g_cfg.mem_format, bar),
+                             "");
+    break;
+  case M_BRIGHTNESS:
+    dst = texts[(*text_n)++];
+    format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
+               bar->brightness_pct, "☀", dst, 256);
+    ents[n++] = (ModuleEntry){dst, &st_brightness, "brightness", -1};
+    ensure_numeric_min_width(&st_brightness,
+                             module_fmt("brightness", g_cfg.brightness_fmt,
+                                        bar),
+                             "☀");
+    break;
+  case M_VOLUME:
+    {
+      int ai = alt_index("volume");
+      const char *fmt;
+      const char *icon;
+      if (ai >= 0 && bar->alt_on[ai]) {
+        fmt = g_cfg.alts[ai].fmt;
+        icon = "";
+      } else if (bar->volume_muted) {
+        fmt = g_cfg.volume_fmt_muted;
+        icon = "🔇";
+      } else {
+        fmt = g_cfg.volume_fmt;
+        icon = "";
+      }
+      dst = texts[(*text_n)++];
+      format_int(fmt, bar->volume_pct, icon, dst, 256);
+      ents[n++] = (ModuleEntry){dst, &st_volume, "volume", -1};
+      ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt, "");
+      ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt_muted, "🔇");
+    }
+    break;
+  case M_CLOCK_TIME:
+    dst = texts[(*text_n)++];
+    strftime(dst, 256, module_fmt("clock", g_cfg.clock_time_format, bar),
+             tm);
+    ents[n++] = (ModuleEntry){dst, &st_clock, "clock", -1};
+    break;
+  case M_CLOCK_DATE:
+    dst = texts[(*text_n)++];
+    strftime(dst, 256, module_fmt("clock.date", g_cfg.clock_date_format, bar),
+             tm);
+    ents[n++] = (ModuleEntry){dst, &st_clock_date, "clock.date", -1};
+    break;
+  case M_KEYMODE:
+    dst = texts[(*text_n)++];
+    format_value(module_fmt("keymode", g_cfg.keymode_format, bar), bar->keymode,
+                 "", dst, 256);
+    ents[n++] = (ModuleEntry){dst, &st_keymode, "keymode", -1};
+    break;
+  case M_KBLAYOUT:
+    dst = texts[(*text_n)++];
+    format_value(module_fmt("keyboardlayout", g_cfg.keyboardlayout_format, bar),
+                 bar->kb_layout, "", dst, 256);
+    ents[n++] = (ModuleEntry){dst, &st_keyboardlayout, "keyboardlayout", -1};
+    break;
+  case M_NETWORK:
+    {
+      int ai = alt_index("network");
+      dst = texts[(*text_n)++];
+      if (ai >= 0 && bar->alt_on[ai]) {
+        char down[32], up[32];
+        format_speed(bar->net_rx_kbps, down, sizeof(down));
+        format_speed(bar->net_tx_kbps, up, sizeof(up));
+        format_network_alt(g_cfg.alts[ai].fmt, bar->net_ifname, down, up, dst,
+                           256);
+      } else {
+        format_value(g_cfg.network_format, bar->net_ifname, "", dst, 256);
+      }
+      ents[n++] = (ModuleEntry){dst, &st_network, "network", -1};
+    }
+    break;
+  case M_HIDE_CLIENTS:
+    if (bar->hideclients > 0) {
+      dst = texts[(*text_n)++];
+      format_int(module_fmt("hideclients", g_cfg.hide_clients_format, bar),
+                 bar->hideclients, "", dst, 256);
+      ents[n++] = (ModuleEntry){dst, &st_hide_clients, "hideclients", -1};
+    }
+    break;
+  case M_CUSTOM:
+    if (custom_module_text(bar, id - M_CUSTOM, texts[(*text_n)], 256,
+                           names[(*name_n)], 96))
+      ents[n++] = (ModuleEntry){texts[(*text_n)++],
+                                &st_custom[id - M_CUSTOM],
+                                names[(*name_n)++], -1};
+    break;
+  default:
+    break;
+  }
+  return n;
+}
+
+static int build_module_entries(Bar *bar, const int *order, int count,
+                                ModuleEntry *ents, int max,
+                                char (*texts)[256], char (*names)[96],
+                                int *text_n, int *name_n) {
+  int n = 0;
+  for (int i = 0; i < count && n < max; i++)
+    n += append_module_entries(bar, order[i], ents + n, max - n, texts, names,
+                               text_n, name_n);
+  return n;
+}
+
+// Truncate text to available width (with "..."), for the window module.
+static void fit_text_width(const char *text, char *out, size_t outsz,
+                           uint32_t avail, uint32_t pads) {
+  char tmp[256];
+  int maxc = 256;
+  while (maxc > 0) {
+    truncate_utf8_string(tmp, text, sizeof(tmp), maxc);
+    int32_t mn, mx;
+    uint32_t tw = text_metrics(tmp, &mn, &mx);
+    if (tw + pads + 16 <= avail || maxc <= 1) {
+      snprintf(out, outsz, "%s", tmp);
+      return;
+    }
+    maxc -= 8;
+  }
+  out[0] = '\0';
+}
+
 static void draw_bar(Bar *bar) {
   IPC_LOG("[draw] %s enter\n", bar->name);
   g_draw_scale = bar->scale > 0 ? (uint32_t)bar->scale : 1;
@@ -814,133 +996,15 @@ static void draw_bar(Bar *bar) {
 
   uint32_t y = (uint32_t)bar_top + (bar_h + font->ascent - font->descent) / 2;
 
-  // --- Build right module list ---
-  struct {
-    const char *text;
-    ModuleStyle *st;
-    const char *module;
-  } modules[MANGOBAR_MAX_RIGHT_MODULES];
-  int mod_count = 0;
-  char mod_text[MANGOBAR_MAX_RIGHT_MODULES][256];
-  char mod_name[MANGOBAR_MAX_RIGHT_MODULES][96];
-  time_t now = time(NULL);
-  struct tm *tm = localtime(&now);
-  for (int i = 0; i < g_cfg.right_count &&
-                   mod_count < MANGOBAR_MAX_RIGHT_MODULES;
-       i++) {
-    int id = g_cfg.right_order[i];
-    ModuleStyle *st = NULL;
-    const char *mname = "";
-    char *dst = mod_text[mod_count];
-    switch (id) {
-    case M_RIGHT_CPU:
-      {
-        char usagestr[16];
-        char loadstr[32];
-        snprintf(usagestr, sizeof(usagestr), "%d", bar->cpu_pct);
-        snprintf(loadstr, sizeof(loadstr), "%.2f", bar->cpu_load);
-        format_value_full(module_fmt("cpu", g_cfg.cpu_format, bar), usagestr,
-                          loadstr, "", dst, sizeof(mod_text[0]));
-      }
-      st = &st_cpu;
-      mname = "cpu";
-      ensure_numeric_min_width(st, module_fmt("cpu", g_cfg.cpu_format, bar),
-                               "");
-      break;
-    case M_RIGHT_MEM:
-      format_int(module_fmt("mem", g_cfg.mem_format, bar), bar->mem_pct, "",
-                 dst, sizeof(mod_text[0]));
-      st = &st_mem;
-      mname = "mem";
-      ensure_numeric_min_width(st, module_fmt("mem", g_cfg.mem_format, bar),
-                               "");
-      break;
-    case M_RIGHT_BRIGHTNESS:
-      format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
-                 bar->brightness_pct, "☀", dst, sizeof(mod_text[0]));
-      st = &st_brightness;
-      mname = "brightness";
-      ensure_numeric_min_width(st,
-                               module_fmt("brightness", g_cfg.brightness_fmt,
-                                          bar),
-                               "☀");
-      break;
-    case M_RIGHT_VOLUME:
-      {
-        int ai = alt_index("volume");
-        if (ai >= 0 && bar->alt_on[ai]) {
-          format_int(g_cfg.alts[ai].fmt, bar->volume_pct, "", dst,
-                     sizeof(mod_text[0]));
-        } else if (bar->volume_muted) {
-          format_int(g_cfg.volume_fmt_muted, bar->volume_pct, "🔇", dst,
-                     sizeof(mod_text[0]));
-        } else {
-          format_int(g_cfg.volume_fmt, bar->volume_pct, "", dst,
-                     sizeof(mod_text[0]));
-        }
-      }
-      st = &st_volume;
-      mname = "volume";
-      ensure_numeric_min_width(st, g_cfg.volume_fmt, "");
-      ensure_numeric_min_width(st, g_cfg.volume_fmt_muted, "🔇");
-      break;
-    case M_RIGHT_CLOCK_TIME:
-      strftime(dst, sizeof(mod_text[0]),
-               module_fmt("clock", g_cfg.clock_time_format, bar), tm);
-      st = &st_clock;
-      mname = "clock";
-      break;
-    case M_RIGHT_CLOCK_DATE:
-      strftime(dst, sizeof(mod_text[0]),
-               module_fmt("clock.date", g_cfg.clock_date_format, bar), tm);
-      st = &st_clock_date;
-      mname = "clock.date";
-      break;
-    case M_RIGHT_KEYMODE:
-      format_value(module_fmt("keymode", g_cfg.keymode_format, bar),
-                   bar->keymode, "", dst, sizeof(mod_text[0]));
-      st = &st_keymode;
-      mname = "keymode";
-      break;
-    case M_RIGHT_KBLAYOUT:
-      format_value(module_fmt("keyboardlayout", g_cfg.keyboardlayout_format,
-                              bar),
-                   bar->kb_layout, "", dst, sizeof(mod_text[0]));
-      st = &st_keyboardlayout;
-      mname = "keyboardlayout";
-      break;
-    case M_RIGHT_NETWORK: {
-      int ai = alt_index("network");
-      if (ai >= 0 && bar->alt_on[ai]) {
-        char down[32], up[32];
-        format_speed(bar->net_rx_kbps, down, sizeof(down));
-        format_speed(bar->net_tx_kbps, up, sizeof(up));
-        format_network_alt(g_cfg.alts[ai].fmt, bar->net_ifname, down, up, dst,
-                           sizeof(mod_text[0]));
-      } else {
-        format_value(g_cfg.network_format, bar->net_ifname, "", dst,
-                     sizeof(mod_text[0]));
-      }
-      st = &st_network;
-      mname = "network";
-      break;
-    }
-    case M_CUSTOM: {
-      char *nm = mod_name[mod_count];
-      if (!custom_module_text(bar, id - M_CUSTOM, dst, sizeof(mod_text[0]), nm,
-                              sizeof(mod_name[0])))
-        continue;
-      st = &st_custom[id - M_CUSTOM];
-      mname = nm;
-      break;
-    }
-    default:
-      continue;
-    }
-    if (dst[0])
-      modules[mod_count++] =
-          (typeof(modules[0])){mod_text[mod_count - 1], st, mname};
-  }
+  // --- Build right modules (width known before left/center layout) ---
+  ModuleEntry right_ents[MAX_MODULE_ENTRIES];
+  char right_texts[MAX_MODULE_ENTRIES][256];
+  char right_names[MAX_MODULE_ENTRIES][96];
+  int rtext_n = 0, rname_n = 0;
+  int right_n = build_module_entries(bar, g_cfg.right_order, g_cfg.right_count,
+                                     right_ents, MAX_MODULE_ENTRIES,
+                                     right_texts, right_names, &rtext_n,
+                                     &rname_n);
 
   // Visible tray items
   int tray_vis_count = 0;
@@ -950,13 +1014,14 @@ static void draw_bar(Bar *bar) {
 
   // Total right width (no separators between modules)
   uint32_t right_total_w = 0;
-  for (int i = 0; i < mod_count; i++) {
+  for (int i = 0; i < right_n; i++) {
     int32_t mn, mx;
-    uint32_t tw = text_metrics(modules[i].text, &mn, &mx);
-    uint32_t body = tw + modules[i].st->pad_l + modules[i].st->pad_r;
-    uint32_t mw = body + modules[i].st->margin_l + modules[i].st->margin_r;
-    if ((int)mw < modules[i].st->min_width)
-      mw = (uint32_t)modules[i].st->min_width;
+    uint32_t tw = text_metrics(right_ents[i].text, &mn, &mx);
+    uint32_t body = tw + right_ents[i].st->pad_l + right_ents[i].st->pad_r;
+    uint32_t mw = body + right_ents[i].st->margin_l +
+                  right_ents[i].st->margin_r;
+    if ((int)mw < right_ents[i].st->min_width)
+      mw = (uint32_t)right_ents[i].st->min_width;
     right_total_w += mw;
   }
 
@@ -985,56 +1050,26 @@ static void draw_bar(Bar *bar) {
       right_edge > right_total_w ? right_edge - right_total_w : 0;
   uint32_t left_max = right_group_left;
 
-  // --- 1. Left modules: tags (limited by right group) ---
+  // --- Left modules (limited by right group) ---
+  ModuleEntry scratch[MAX_MODULE_ENTRIES];
+  char scratch_texts[MAX_MODULE_ENTRIES][256];
+  char scratch_names[MAX_MODULE_ENTRIES][96];
+  int stext_n = 0, sname_n = 0;
+  int left_n = build_module_entries(bar, g_cfg.left_order, g_cfg.left_count,
+                                    scratch, MAX_MODULE_ENTRIES,
+                                    scratch_texts, scratch_names, &stext_n,
+                                    &sname_n);
   uint32_t x = bar_left;
-  if (g_cfg.enable_tags) {
-    if (bar->overview_mode) {
-      if (x < left_max)
-        x = draw_module(bar, "tags", -1, g_cfg.overview_label, &st_overview, x,
-                        y, fg, fg_mask, bg, left_max, bar_h);
-    } else {
-      for (int i = 0; i < bar->tag_count; i++) {
-        if (x >= left_max)
-          break;
-        if (g_cfg.only_occupied &&
-            !(bar->ctags & (1 << i)) && !(bar->atags & (1 << i)))
-          continue;
-        bool active = bar->mtags & (1 << i);
-        bool urgent = bar->urg & (1 << i);
-        bool occupied = bar->ctags & (1 << i);
-        ModuleStyle *st;
-        if (urgent)
-          st = &st_tags[2];
-        else if (active)
-          st = &st_tags[0];
-        else if (occupied)
-          st = &st_tags[1];
-        else
-          st = &st_tags[3];
-        x = draw_module(bar, "tags", i, g_cfg.tag_names[i], st, x, y, fg,
-                        fg_mask, bg, left_max, bar_h);
-      }
+  for (int i = 0; i < left_n && x < left_max; i++) {
+    const char *text = scratch[i].text;
+    char fit[256];
+    if (strcmp(scratch[i].module, "title") == 0 && left_max > x) {
+      fit_text_width(text, fit, sizeof(fit), left_max - x,
+                     scratch[i].st->pad_l + scratch[i].st->pad_r);
+      text = fit;
     }
-  }
-
-  // Layout module
-  if (g_cfg.enable_layout && x < left_max) {
-    char layout_text[64];
-    format_value(g_cfg.layout_format, bar->layout, "", layout_text,
-                 sizeof(layout_text));
-    x = draw_module(bar, "layout", -1, layout_text, &st_layout, x, y, fg,
-                    fg_mask, bg, left_max, bar_h);
-  }
-  for (int i = 0; i < g_cfg.left_count && x < left_max; i++) {
-    int id = g_cfg.left_order[i];
-    if (id < M_CUSTOM)
-      continue;
-    char text[256], nm[64];
-    if (!custom_module_text(bar, id - M_CUSTOM, text, sizeof(text), nm,
-                            sizeof(nm)))
-      continue;
-    x = draw_module(bar, nm, -1, text, &st_custom[id - M_CUSTOM], x, y, fg,
-                    fg_mask, bg, left_max, bar_h);
+    x = draw_module(bar, scratch[i].module, scratch[i].tag, text,
+                    scratch[i].st, x, y, fg, fg_mask, bg, left_max, bar_h);
   }
   uint32_t left_end = x;
 
@@ -1045,45 +1080,46 @@ static void draw_bar(Bar *bar) {
   if (right_start > right_edge)
     right_start = right_edge;
 
-  // Middle background + title (title hidden last)
+  // Middle background
   if (right_start > left_end) {
     uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
     pixman_image_fill_boxes(
         PIXMAN_OP_SRC, bg, bar->sel ? &st_bar_sel.bg : &st_bar.bg, 1,
         &(pixman_box32_t){.x1 = left_end * s, .x2 = right_start * s,
                           .y1 = bar_top * s, .y2 = (bar_top + bar_h) * s});
-    if (g_cfg.enable_title && bar->title[0] != '\0') {
-      uint32_t avail = right_start - left_end;
-      char full_title[256], title_text[256];
-      format_value(g_cfg.title_format, bar->title, "", full_title,
-                   sizeof(full_title));
-      fit_text_width(full_title, title_text, sizeof(title_text), avail,
-                     st_title.pad_l + st_title.pad_r);
+  }
+
+  // --- Center modules ---
+  stext_n = 0;
+  sname_n = 0;
+  int center_n =
+      build_module_entries(bar, g_cfg.center_order, g_cfg.center_count,
+                           scratch, MAX_MODULE_ENTRIES, scratch_texts,
+                           scratch_names, &stext_n, &sname_n);
+  if (center_n > 0 && right_start > left_end) {
+    uint32_t cw = 0;
+    for (int i = 0; i < center_n; i++) {
       int32_t mn, mx;
-      uint32_t tw = text_metrics(title_text, &mn, &mx);
-      uint32_t mw = tw + st_title.pad_l + st_title.pad_r + st_title.margin_l +
-                    st_title.margin_r;
-      if ((int)mw < st_title.min_width)
-        mw = (uint32_t)st_title.min_width;
-      if (title_text[0] && mw + 16 <= avail) {
-        uint32_t title_x = left_end;
-        uint32_t x1 = title_x + st_title.margin_l;
-        uint32_t x2 = x1 + mw - st_title.margin_l - st_title.margin_r;
-        if (x2 > right_start)
-          x2 = right_start;
-        if (bar_bg_cr && x2 > x1) {
-          int rad = module_radius(&st_title, bar_h);
-          double r, g, b, a;
-          pixman_color_to_doubles(&st_title.bg, &r, &g, &b, &a);
-          cairo_set_source_rgba(bar_bg_cr, r, g, b, a);
-          cairo_rounded_rect(bar_bg_cr, x1, bar_top, (double)(x2 - x1),
-                             (double)bar_h, rad);
-          cairo_fill(bar_bg_cr);
-          draw_text(title_text, x1 + st_title.pad_l, y, fg, fg_mask, NULL,
-                    &st_title.fg, NULL, right_start, bar_h);
-          record_hotspot(bar, "title", -1, title_x, title_x + mw);
-        }
+      uint32_t tw = text_metrics(scratch[i].text, &mn, &mx);
+      uint32_t body = tw + scratch[i].st->pad_l + scratch[i].st->pad_r;
+      uint32_t mw = body + scratch[i].st->margin_l + scratch[i].st->margin_r;
+      if ((int)mw < scratch[i].st->min_width)
+        mw = (uint32_t)scratch[i].st->min_width;
+      cw += mw;
+    }
+    uint32_t avail = right_start - left_end;
+    uint32_t cx = cw < avail ? left_end + (avail - cw) / 2 : left_end;
+    for (int i = 0; i < center_n && cx < right_start; i++) {
+      const char *text = scratch[i].text;
+      char fit[256];
+      if (strcmp(scratch[i].module, "title") == 0 && right_start > cx) {
+        fit_text_width(text, fit, sizeof(fit), right_start - cx,
+                       scratch[i].st->pad_l + scratch[i].st->pad_r);
+        text = fit;
       }
+      cx = draw_module(bar, scratch[i].module, scratch[i].tag, text,
+                       scratch[i].st, cx, y, fg, fg_mask, bg, right_start,
+                       bar_h);
     }
   }
 
@@ -1115,12 +1151,12 @@ static void draw_bar(Bar *bar) {
     }
     cur_x += tray_w;
   }
-  for (int i = 0; i < mod_count; i++) {
+  for (int i = 0; i < right_n; i++) {
     if (cur_x >= right_edge)
       break;
-    cur_x = draw_module(bar, modules[i].module, -1, modules[i].text,
-                        modules[i].st, cur_x, y, fg, fg_mask, bg, right_edge,
-                        bar_h);
+    cur_x = draw_module(bar, right_ents[i].module, right_ents[i].tag,
+                        right_ents[i].text, right_ents[i].st, cur_x, y, fg,
+                        fg_mask, bg, right_edge, bar_h);
   }
 
   if (bar_bg_cr) {
@@ -1328,6 +1364,8 @@ static Bar *find_bar(const char *name) {
 static void update_bar_json(Bar *bar, cJSON *json) {
   cJSON *item;
   IPC_LOG("[ipc] update %s start\n", bar->name);
+  if ((item = cJSON_GetObjectItem(json, "hide_clients")) && cJSON_IsNumber(item))
+    bar->hideclients = item->valueint;
   if ((item = cJSON_GetObjectItem(json, "active")))
     bar->sel = cJSON_IsTrue(item);
   if ((item = cJSON_GetObjectItem(json, "layout_symbol")))
@@ -3325,7 +3363,8 @@ static void init_styles() {
                         &st_tags[3], &st_tags[4], &st_layout,
                         &st_title,   &st_clock,   &st_clock_date, &st_cpu,
                         &st_mem,     &st_brightness, &st_volume,
-                        &st_keymode, &st_keyboardlayout, &st_network, &st_overview,
+                        &st_keymode, &st_keyboardlayout, &st_network,
+                        &st_hide_clients, &st_overview,
                         &st_separator, &st_tray, &st_bar, &st_bar_sel};
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
     all[i]->radius = g_cfg.radius_default;
@@ -3375,6 +3414,8 @@ static void init_styles() {
   hex_to_pixman(keyboardlayout_bg_color_hex, &st_keyboardlayout.bg);
   hex_to_pixman(clock_fg_color_hex, &st_network.fg);
   hex_to_pixman(clock_bg_color_hex, &st_network.bg);
+  hex_to_pixman(hide_clients_fg_color_hex, &st_hide_clients.fg);
+  hex_to_pixman(hide_clients_bg_color_hex, &st_hide_clients.bg);
 
   hex_to_pixman(tray_fg_color_hex, &st_tray.fg);
   hex_to_pixman(tray_bg_color_hex, &st_tray.bg);
@@ -3410,6 +3451,7 @@ static void init_styles() {
   apply_css(&st_keymode, "keymode", NULL);
   apply_css(&st_keyboardlayout, "keyboardlayout", NULL);
   apply_css(&st_network, "network", NULL);
+  apply_css(&st_hide_clients, "hideclients", NULL);
   apply_css(&st_overview, "overview", NULL);
   apply_css(&st_separator, "separator", NULL);
   apply_css(&st_tray, "tray", NULL);

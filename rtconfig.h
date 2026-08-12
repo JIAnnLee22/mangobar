@@ -7,21 +7,26 @@
 
 #define MANGOBAR_MAX_TAGS 31
 #define MANGOBAR_MAX_ACTIONS 32
-#define MANGOBAR_MAX_RIGHT_MODULES 16
+#define MANGOBAR_MAX_MODULES 16
 #define MANGOBAR_MAX_CUSTOM 16
 #define MANGOBAR_MAX_ALTS 48
 
-enum MangoRightModule {
-  M_RIGHT_NONE = 0,
-  M_RIGHT_CPU,
-  M_RIGHT_MEM,
-  M_RIGHT_BRIGHTNESS,
-  M_RIGHT_VOLUME,
-  M_RIGHT_CLOCK_TIME,
-  M_RIGHT_CLOCK_DATE,
-  M_RIGHT_KEYMODE,
-  M_RIGHT_KBLAYOUT,
-  M_RIGHT_NETWORK,
+enum MangoModule {
+  M_NONE = 0,
+  M_TAGS,
+  M_LAYOUT,
+  M_TITLE,
+  M_TRAY,
+  M_CPU,
+  M_MEM,
+  M_BRIGHTNESS,
+  M_VOLUME,
+  M_CLOCK_TIME,
+  M_CLOCK_DATE,
+  M_KEYMODE,
+  M_KBLAYOUT,
+  M_NETWORK,
+  M_HIDE_CLIENTS,
   M_CUSTOM = 100, // + index into g_cfg.customs
 };
 
@@ -60,16 +65,6 @@ typedef struct {
   char font[256]; // fallback font when CSS sets none
   char tag_names[MANGOBAR_MAX_TAGS][8];
   char overview_label[64];
-  bool enable_tags;
-  bool enable_layout;
-  bool enable_title;
-  bool enable_cpu;
-  bool enable_mem;
-  bool enable_clock;
-  bool enable_brightness;
-  bool enable_volume;
-  bool enable_keymode;
-  bool enable_keyboardlayout;
   bool enable_tray;
   bool only_occupied;
   char separator[16];
@@ -91,9 +86,12 @@ typedef struct {
   char keymode_format[64];
   char keyboardlayout_format[64];
   char network_format[64];
-  int left_order[MANGOBAR_MAX_RIGHT_MODULES];
+  char hide_clients_format[64];
+  int left_order[MANGOBAR_MAX_MODULES];
   int left_count;
-  int right_order[MANGOBAR_MAX_RIGHT_MODULES];
+  int center_order[MANGOBAR_MAX_MODULES];
+  int center_count;
+  int right_order[MANGOBAR_MAX_MODULES];
   int right_count;
   MangoCustomModule customs[MANGOBAR_MAX_CUSTOM];
   int custom_count;

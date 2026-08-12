@@ -71,7 +71,9 @@ The JSONC config supports `height`, `layer`, `buffer-scale`, `font`,
 `css` (or `style`), and per-module `format`, `interval`, `on-click`,
 `on-scroll-*` etc. Unsupported modules are ignored. All runtime settings
 come from JSONC and CSS. See [`config.jsonc`](config.jsonc) for a complete
-example.
+example. Any module can be placed in `modules-left`, `modules-center` or
+`modules-right`; left is anchored to the left edge, right to the right edge
+and center is centered between them.
 
 `buffer-scale` is a multiplier on top of the output's Wayland scale
 (default `1`); leave it at `1` to follow the display's HiDPI scale
@@ -97,6 +99,8 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 - `clock`: time (`#clock`) and date (`#clock.date`) with separate CSS
 - `network`: shows the active interface name; click toggles up/down speeds
   (KB/s below 1MB/s, MB/s otherwise)
+- `hideclients`: shows the hidden-window count for the monitor; the module
+  hides itself while the count is zero
 - `tray`: StatusNotifierItem / DBusMenu, with a side-opening submenu
 - `custom/<name>`: user-defined modules (see below)
 
