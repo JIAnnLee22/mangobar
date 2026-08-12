@@ -67,10 +67,11 @@ Run `mangobar` inside a mangowm session. It reads configuration from:
 1. `$MANGOBAR_CONFIG`
 2. `~/.config/mangobar/config.jsonc`
 
-The JSONC config supports `height`, `layer`, `buffer-scale`, `font`,
-`css` (or `style`), and per-module `format`, `interval`, `on-click`,
+The JSONC config supports `height`, `layer`, `buffer-scale`, `css`
+(or `style`), and per-module `format`, `interval`, `on-click`,
 `on-scroll-*` etc. Unsupported modules are ignored. All runtime settings
-come from JSONC and CSS. See [`config.jsonc`](config.jsonc) for a complete
+come from JSONC and CSS; fonts are set in CSS only (`font-family`,
+`font-size`, `font-weight`). See [`config.jsonc`](config.jsonc) for a complete
 example. Any module can be placed in `modules-left`, `modules-center` or
 `modules-right`; left is anchored to the left edge, right to the right edge
 and center is centered between them.

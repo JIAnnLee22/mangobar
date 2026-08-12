@@ -620,9 +620,6 @@ int mango_config_load(const char *path) {
   if ((v = cJSON_GetObjectItemCaseSensitive(root, "buffer-scale")) &&
       cJSON_IsNumber(v) && v->valueint > 0)
     g_cfg.buffer_scale = v->valueint;
-  if ((v = cJSON_GetObjectItemCaseSensitive(root, "font")) &&
-      cJSON_IsString(v))
-    cfg_set(g_cfg.font, sizeof(g_cfg.font), v->valuestring);
   if ((v = cJSON_GetObjectItemCaseSensitive(root, "layer")) &&
       cJSON_IsString(v)) {
     if (strcmp(v->valuestring, "overlay") == 0)
