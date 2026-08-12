@@ -65,7 +65,6 @@ typedef struct {
   char font[256]; // fallback font when CSS sets none
   char tag_names[MANGOBAR_MAX_TAGS][8];
   char overview_label[64];
-  bool enable_tray;
   bool only_occupied;
   char separator[16];
   int tray_pad;

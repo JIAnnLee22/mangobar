@@ -8,11 +8,11 @@
     "modules-left": [
         "workspaces",
         "layout",
-        "hideclients",
         "window"
     ],
     "modules-center": [],
     "modules-right": [
+        "hideclients",
         "tray",
         "network",
         // "keymode",

@@ -744,6 +744,9 @@ typedef struct {
   ModuleStyle *st;
   const char *module;
   int tag;
+  bool is_tray;
+  uint32_t width;
+  int tray_icon_size;
 } ModuleEntry;
 
 // Fill entries for one module id; returns the number of entries added.
@@ -758,8 +761,9 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
   case M_TAGS:
     if (bar->overview_mode) {
       if (max > 0)
-        ents[n++] = (ModuleEntry){g_cfg.overview_label, &st_overview, "tags",
-                                  -1};
+        ents[n++] = (ModuleEntry){.text = g_cfg.overview_label,
+                                  .st = &st_overview, .module = "tags",
+                                  .tag = -1};
     } else {
       for (int i = 0; i < bar->tag_count && n < max; i++) {
         if (g_cfg.only_occupied && !(bar->ctags & (1 << i)) &&
@@ -774,20 +778,23 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
           st = &st_tags[1];
         else
           st = &st_tags[3];
-        ents[n++] = (ModuleEntry){g_cfg.tag_names[i], st, "tags", i};
+        ents[n++] = (ModuleEntry){.text = g_cfg.tag_names[i], .st = st,
+                                  .module = "tags", .tag = i};
       }
     }
     break;
   case M_LAYOUT:
     dst = texts[(*text_n)++];
     format_value(g_cfg.layout_format, bar->layout, "", dst, 256);
-    ents[n++] = (ModuleEntry){dst, &st_layout, "layout", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_layout,
+                              .module = "layout", .tag = -1};
     break;
   case M_TITLE:
     if (bar->title[0]) {
       dst = texts[(*text_n)++];
       format_value(g_cfg.title_format, bar->title, "", dst, 256);
-      ents[n++] = (ModuleEntry){dst, &st_title, "title", -1};
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_title,
+                                .module = "title", .tag = -1};
     }
     break;
   case M_CPU:
@@ -799,7 +806,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       dst = texts[(*text_n)++];
       format_value_full(module_fmt("cpu", g_cfg.cpu_format, bar), usagestr,
                         loadstr, "", dst, 256);
-      ents[n++] = (ModuleEntry){dst, &st_cpu, "cpu", -1};
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_cpu,
+                                .module = "cpu", .tag = -1};
       ensure_numeric_min_width(&st_cpu, module_fmt("cpu", g_cfg.cpu_format, bar),
                                "");
     }
@@ -808,7 +816,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     dst = texts[(*text_n)++];
     format_int(module_fmt("mem", g_cfg.mem_format, bar), bar->mem_pct, "", dst,
                256);
-    ents[n++] = (ModuleEntry){dst, &st_mem, "mem", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_mem, .module = "mem",
+                              .tag = -1};
     ensure_numeric_min_width(&st_mem, module_fmt("mem", g_cfg.mem_format, bar),
                              "");
     break;
@@ -816,7 +825,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     dst = texts[(*text_n)++];
     format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
                bar->brightness_pct, "☀", dst, 256);
-    ents[n++] = (ModuleEntry){dst, &st_brightness, "brightness", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_brightness,
+                              .module = "brightness", .tag = -1};
     ensure_numeric_min_width(&st_brightness,
                              module_fmt("brightness", g_cfg.brightness_fmt,
                                         bar),
@@ -839,7 +849,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       }
       dst = texts[(*text_n)++];
       format_int(fmt, bar->volume_pct, icon, dst, 256);
-      ents[n++] = (ModuleEntry){dst, &st_volume, "volume", -1};
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_volume,
+                                .module = "volume", .tag = -1};
       ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt, "");
       ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt_muted, "🔇");
     }
@@ -848,25 +859,29 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     dst = texts[(*text_n)++];
     strftime(dst, 256, module_fmt("clock", g_cfg.clock_time_format, bar),
              tm);
-    ents[n++] = (ModuleEntry){dst, &st_clock, "clock", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_clock, .module = "clock",
+                              .tag = -1};
     break;
   case M_CLOCK_DATE:
     dst = texts[(*text_n)++];
     strftime(dst, 256, module_fmt("clock.date", g_cfg.clock_date_format, bar),
              tm);
-    ents[n++] = (ModuleEntry){dst, &st_clock_date, "clock.date", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_clock_date,
+                              .module = "clock.date", .tag = -1};
     break;
   case M_KEYMODE:
     dst = texts[(*text_n)++];
     format_value(module_fmt("keymode", g_cfg.keymode_format, bar), bar->keymode,
                  "", dst, 256);
-    ents[n++] = (ModuleEntry){dst, &st_keymode, "keymode", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_keymode,
+                              .module = "keymode", .tag = -1};
     break;
   case M_KBLAYOUT:
     dst = texts[(*text_n)++];
     format_value(module_fmt("keyboardlayout", g_cfg.keyboardlayout_format, bar),
                  bar->kb_layout, "", dst, 256);
-    ents[n++] = (ModuleEntry){dst, &st_keyboardlayout, "keyboardlayout", -1};
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_keyboardlayout,
+                              .module = "keyboardlayout", .tag = -1};
     break;
   case M_NETWORK:
     {
@@ -881,7 +896,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       } else {
         format_value(g_cfg.network_format, bar->net_ifname, "", dst, 256);
       }
-      ents[n++] = (ModuleEntry){dst, &st_network, "network", -1};
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_network,
+                                .module = "network", .tag = -1};
     }
     break;
   case M_HIDE_CLIENTS:
@@ -889,15 +905,39 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       dst = texts[(*text_n)++];
       format_int(module_fmt("hideclients", g_cfg.hide_clients_format, bar),
                  bar->hideclients, "", dst, 256);
-      ents[n++] = (ModuleEntry){dst, &st_hide_clients, "hideclients", -1};
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_hide_clients,
+                                .module = "hideclients", .tag = -1};
+    }
+    break;
+  case M_TRAY:
+    {
+      int tvis = 0;
+      if (tray && tray_visible_items(tray, &tvis) && tvis > 0) {
+        int tsize = g_cfg.tray_icon_size > 0
+                        ? g_cfg.tray_icon_size
+                        : (int)bar_h - 2 * g_cfg.tray_pad;
+        if (tsize < 8)
+          tsize = 8;
+        if (tsize > (int)bar_h - 2 * g_cfg.tray_pad)
+          tsize = (int)bar_h - 2 * g_cfg.tray_pad;
+        uint32_t tw = (uint32_t)(tvis * tsize + (tvis - 1) * g_cfg.tray_gap +
+                                 st_tray.pad_l + st_tray.pad_r +
+                                 st_tray.margin_l + st_tray.margin_r);
+        ents[n++] = (ModuleEntry){.module = "tray",
+                                  .st = &st_tray,
+                                  .tag = -1,
+                                  .is_tray = true,
+                                  .width = tw,
+                                  .tray_icon_size = tsize};
+      }
     }
     break;
   case M_CUSTOM:
     if (custom_module_text(bar, id - M_CUSTOM, texts[(*text_n)], 256,
                            names[(*name_n)], 96))
-      ents[n++] = (ModuleEntry){texts[(*text_n)++],
-                                &st_custom[id - M_CUSTOM],
-                                names[(*name_n)++], -1};
+      ents[n++] = (ModuleEntry){.text = texts[(*text_n)++],
+                                .st = &st_custom[id - M_CUSTOM],
+                                .module = names[(*name_n)++], .tag = -1};
     break;
   default:
     break;
@@ -932,6 +972,61 @@ static void fit_text_width(const char *text, char *out, size_t outsz,
     maxc -= 8;
   }
   out[0] = '\0';
+}
+
+static uint32_t module_entry_width(const ModuleEntry *e) {
+  if (e->is_tray)
+    return e->width;
+  int32_t mn, mx;
+  uint32_t tw = text_metrics(e->text, &mn, &mx);
+  uint32_t body = tw + e->st->pad_l + e->st->pad_r;
+  uint32_t mw = body + e->st->margin_l + e->st->margin_r;
+  if ((int)mw < e->st->min_width)
+    mw = (uint32_t)e->st->min_width;
+  return mw;
+}
+
+static uint32_t draw_tray_entry(Bar *bar, const ModuleEntry *e, uint32_t x,
+                                uint32_t y, pixman_image_t *fg,
+                                pixman_image_t *fg_mask, pixman_image_t *bg,
+                                uint32_t max_x, uint32_t buf_h) {
+  int count = 0;
+  MangobarTrayItem **items = tray_visible_items(tray, &count);
+  uint32_t tray_x1 = x + st_tray.margin_l;
+  uint32_t tray_body_w = e->width - st_tray.margin_l - st_tray.margin_r;
+  if (tray_x1 + tray_body_w > max_x)
+    tray_body_w = max_x > tray_x1 ? max_x - tray_x1 : 0;
+  if (bar_bg_cr && tray_body_w > 0) {
+    double tr, tg, tb, ta;
+    pixman_color_to_doubles(&st_tray.bg, &tr, &tg, &tb, &ta);
+    cairo_set_source_rgba(bar_bg_cr, tr, tg, tb, ta);
+    cairo_rounded_rect(bar_bg_cr, tray_x1, bar_top, (double)tray_body_w,
+                       (double)buf_h, module_radius(&st_tray, buf_h));
+    cairo_fill(bar_bg_cr);
+  }
+  uint32_t cur = tray_x1;
+  int tpad = st_tray.pad_l > 0 ? st_tray.pad_l : g_cfg.tray_pad;
+  int tsize = e->tray_icon_size;
+  for (int i = 0; i < count; i++) {
+    int dx = (int)cur + tpad;
+    int dy = bar_top + ((int)buf_h - tsize) / 2;
+    draw_tray_icon(bg, tray_item_icon(items[i]), tsize, dx, dy);
+    record_tray_hotspot(bar, items[i], (uint32_t)cur,
+                        (uint32_t)(cur + (uint32_t)tsize + (uint32_t)tpad +
+                                   st_tray.pad_r));
+    cur += (uint32_t)(tsize + g_cfg.tray_gap);
+  }
+  return x + e->width;
+}
+
+static uint32_t draw_module_entry(Bar *bar, const ModuleEntry *e, uint32_t x,
+                                  uint32_t y, pixman_image_t *fg,
+                                  pixman_image_t *fg_mask, pixman_image_t *bg,
+                                  uint32_t max_x, uint32_t buf_h) {
+  if (e->is_tray)
+    return draw_tray_entry(bar, e, x, y, fg, fg_mask, bg, max_x, buf_h);
+  return draw_module(bar, e->module, e->tag, e->text, e->st, x, y, fg, fg_mask,
+                     bg, max_x, buf_h);
 }
 
 static void draw_bar(Bar *bar) {
@@ -1006,46 +1101,15 @@ static void draw_bar(Bar *bar) {
                                      right_texts, right_names, &rtext_n,
                                      &rname_n);
 
-  // Visible tray items
-  int tray_vis_count = 0;
-  MangobarTrayItem **tray_items = NULL;
-  if (g_cfg.enable_tray && tray)
-    tray_items = tray_visible_items(tray, &tray_vis_count);
-
   // Total right width (no separators between modules)
   uint32_t right_total_w = 0;
   for (int i = 0; i < right_n; i++) {
-    int32_t mn, mx;
-    uint32_t tw = text_metrics(right_ents[i].text, &mn, &mx);
-    uint32_t body = tw + right_ents[i].st->pad_l + right_ents[i].st->pad_r;
-    uint32_t mw = body + right_ents[i].st->margin_l +
-                  right_ents[i].st->margin_r;
-    if ((int)mw < right_ents[i].st->min_width)
-      mw = (uint32_t)right_ents[i].st->min_width;
-    right_total_w += mw;
-  }
-
-  // Tray area
-  uint32_t tray_w = 0;
-  int tray_icon_size = 0;
-  if (tray_vis_count > 0) {
-    tray_icon_size = g_cfg.tray_icon_size > 0
-                         ? g_cfg.tray_icon_size
-                         : (int)bar_h - 2 * g_cfg.tray_pad;
-    if (tray_icon_size < 8)
-      tray_icon_size = 8;
-    if (tray_icon_size > (int)bar_h - 2 * g_cfg.tray_pad)
-      tray_icon_size = (int)bar_h - 2 * g_cfg.tray_pad;
-    tray_w = (uint32_t)(tray_vis_count * tray_icon_size +
-                        (tray_vis_count - 1) * g_cfg.tray_gap +
-                        st_tray.pad_l + st_tray.pad_r + st_tray.margin_l +
-                        st_tray.margin_r);
+    right_total_w += module_entry_width(&right_ents[i]);
   }
 
   uint32_t logical_w = bar->width / (bar->scale > 0 ? (uint32_t)bar->scale : 1);
   uint32_t right_edge = logical_w > bar_right ? logical_w - bar_right : 0;
-  // Right group (tray leftmost + modules) right-aligned
-  right_total_w += tray_w;
+  // Right group right-aligned
   uint32_t right_group_left =
       right_edge > right_total_w ? right_edge - right_total_w : 0;
   uint32_t left_max = right_group_left;
@@ -1068,8 +1132,9 @@ static void draw_bar(Bar *bar) {
                      scratch[i].st->pad_l + scratch[i].st->pad_r);
       text = fit;
     }
-    x = draw_module(bar, scratch[i].module, scratch[i].tag, text,
-                    scratch[i].st, x, y, fg, fg_mask, bg, left_max, bar_h);
+    ModuleEntry me = scratch[i];
+    me.text = text;
+    x = draw_module_entry(bar, &me, x, y, fg, fg_mask, bg, left_max, bar_h);
   }
   uint32_t left_end = x;
 
@@ -1099,13 +1164,7 @@ static void draw_bar(Bar *bar) {
   if (center_n > 0 && right_start > left_end) {
     uint32_t cw = 0;
     for (int i = 0; i < center_n; i++) {
-      int32_t mn, mx;
-      uint32_t tw = text_metrics(scratch[i].text, &mn, &mx);
-      uint32_t body = tw + scratch[i].st->pad_l + scratch[i].st->pad_r;
-      uint32_t mw = body + scratch[i].st->margin_l + scratch[i].st->margin_r;
-      if ((int)mw < scratch[i].st->min_width)
-        mw = (uint32_t)scratch[i].st->min_width;
-      cw += mw;
+      cw += module_entry_width(&scratch[i]);
     }
     uint32_t avail = right_start - left_end;
     uint32_t cx = cw < avail ? left_end + (avail - cw) / 2 : left_end;
@@ -1117,46 +1176,20 @@ static void draw_bar(Bar *bar) {
                        scratch[i].st->pad_l + scratch[i].st->pad_r);
         text = fit;
       }
-      cx = draw_module(bar, scratch[i].module, scratch[i].tag, text,
-                       scratch[i].st, cx, y, fg, fg_mask, bg, right_start,
-                       bar_h);
+      ModuleEntry me = scratch[i];
+      me.text = text;
+      cx = draw_module_entry(bar, &me, cx, y, fg, fg_mask, bg, right_start,
+                             bar_h);
     }
   }
 
-  // Draw right group: tray first, then modules
+  // Draw right group
   uint32_t cur_x = right_start;
-  if (tray_vis_count > 0 && cur_x < right_edge) {
-    uint32_t tray_x1 = cur_x + st_tray.margin_l;
-    uint32_t tray_body_w = tray_w - st_tray.margin_l - st_tray.margin_r;
-    if (tray_x1 + tray_body_w > right_edge)
-      tray_body_w = right_edge > tray_x1 ? right_edge - tray_x1 : 0;
-    if (bar_bg_cr && tray_body_w > 0) {
-      double tr, tg, tb, ta;
-      pixman_color_to_doubles(&st_tray.bg, &tr, &tg, &tb, &ta);
-      cairo_set_source_rgba(bar_bg_cr, tr, tg, tb, ta);
-      cairo_rounded_rect(bar_bg_cr, tray_x1, bar_top, (double)tray_body_w,
-                         (double)bar_h, module_radius(&st_tray, bar_h));
-      cairo_fill(bar_bg_cr);
-    }
-    uint32_t cur = tray_x1;
-    int tpad = st_tray.pad_l > 0 ? st_tray.pad_l : g_cfg.tray_pad;
-    for (int i = 0; i < tray_vis_count; i++) {
-      int dx = (int)cur + tpad;
-      int dy = bar_top + ((int)bar_h - tray_icon_size) / 2;
-      draw_tray_icon(bg, tray_item_icon(tray_items[i]), tray_icon_size, dx, dy);
-      record_tray_hotspot(bar, tray_items[i], (uint32_t)cur,
-                          (uint32_t)(cur + tray_icon_size + tpad +
-                                     st_tray.pad_r));
-      cur += (uint32_t)(tray_icon_size + g_cfg.tray_gap);
-    }
-    cur_x += tray_w;
-  }
   for (int i = 0; i < right_n; i++) {
     if (cur_x >= right_edge)
       break;
-    cur_x = draw_module(bar, right_ents[i].module, right_ents[i].tag,
-                        right_ents[i].text, right_ents[i].st, cur_x, y, fg,
-                        fg_mask, bg, right_edge, bar_h);
+    cur_x = draw_module_entry(bar, &right_ents[i], cur_x, y, fg, fg_mask, bg,
+                              right_edge, bar_h);
   }
 
   if (bar_bg_cr) {

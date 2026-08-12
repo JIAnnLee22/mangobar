@@ -278,16 +278,11 @@ static void parse_module_list(cJSON *root, const char *key, int *order,
     int id = module_id(name);
     if (id == M_NONE)
       continue;
-    if (id == M_TRAY) {
-      g_cfg.enable_tray = true;
-      continue; // tray is always drawn on the right
-    }
     add_module(order, count, id);
   }
 }
 
 static void parse_modules(cJSON *root) {
-  g_cfg.enable_tray = false;
   g_cfg.left_count = g_cfg.center_count = g_cfg.right_count = 0;
   parse_module_list(root, "modules-left", g_cfg.left_order, &g_cfg.left_count);
   parse_module_list(root, "modules-center", g_cfg.center_order,
@@ -516,7 +511,6 @@ void mango_config_defaults(void) {
     snprintf(g_cfg.tag_names[i], sizeof(g_cfg.tag_names[i]), "%d", i + 1);
   snprintf(g_cfg.overview_label, sizeof(g_cfg.overview_label), "%s",
            "OVERVIEW");
-  g_cfg.enable_tray = true;
   g_cfg.only_occupied = true;
   snprintf(g_cfg.separator, sizeof(g_cfg.separator), "%s", " | ");
   g_cfg.tray_pad = 2;
@@ -555,6 +549,7 @@ void mango_config_defaults(void) {
   g_cfg.left_order[g_cfg.left_count++] = M_TAGS;
   g_cfg.left_order[g_cfg.left_count++] = M_LAYOUT;
   g_cfg.center_order[g_cfg.center_count++] = M_TITLE;
+  g_cfg.right_order[g_cfg.right_count++] = M_TRAY;
   g_cfg.right_order[g_cfg.right_count++] = M_CPU;
   g_cfg.right_order[g_cfg.right_count++] = M_MEM;
   g_cfg.right_order[g_cfg.right_count++] = M_BRIGHTNESS;
