@@ -584,28 +584,8 @@ const char *mango_config_find_default(char *buf, size_t sz) {
   return NULL;
 }
 
-int mango_config_load(const char *path) {
-  FILE *f = fopen(path, "r");
-  if (!f)
-    return -1;
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz < 0) {
-    fclose(f);
-    return -1;
-  }
-  char *buf = malloc((size_t)sz + 1);
-  if (!buf) {
-    fclose(f);
-    return -1;
-  }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
-  buf[rd] = '\0';
-  fclose(f);
-
-  char *stripped = jsonc_strip(buf);
-  free(buf);
+int mango_config_parse(const char *jsonc) {
+  char *stripped = jsonc_strip(jsonc);
   if (!stripped)
     return -1;
   cJSON *root = cJSON_Parse(stripped);
@@ -640,4 +620,28 @@ int mango_config_load(const char *path) {
   parse_module_configs(root);
   cJSON_Delete(root);
   return 0;
+}
+
+int mango_config_load(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return -1;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz < 0) {
+    fclose(f);
+    return -1;
+  }
+  char *buf = malloc((size_t)sz + 1);
+  if (!buf) {
+    fclose(f);
+    return -1;
+  }
+  size_t rd = fread(buf, 1, (size_t)sz, f);
+  buf[rd] = '\0';
+  fclose(f);
+  int ret = mango_config_parse(buf);
+  free(buf);
+  return ret;
 }

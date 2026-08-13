@@ -36,6 +36,7 @@
 #include <wayland-util.h>
 
 #include "menu.h"
+#include "defaults.h"
 #include "rtconfig.h"
 #include "style.h"
 #include "tray.h"
@@ -3511,8 +3512,13 @@ int main() {
   mango_config_defaults();
   char cfg_buf[512];
   const char *cfg_file = mango_config_find_default(cfg_buf, sizeof(cfg_buf));
-  if (cfg_file && mango_config_load(cfg_file) == 0)
-    fprintf(stderr, "Loaded config: %s\n", cfg_file);
+  if (cfg_file) {
+    if (mango_config_load(cfg_file) == 0)
+      fprintf(stderr, "Loaded config: %s\n", cfg_file);
+  } else {
+    mango_config_parse(default_config_jsonc);
+    fprintf(stderr, "Using built-in default config\n");
+  }
 
   // Load CSS style sheet
   style_sheet_init(&g_style_sheet);
@@ -3525,6 +3531,9 @@ int main() {
   }
   if (css_file) {
     style_sheet_load(&g_style_sheet, css_file);
+  } else {
+    style_sheet_parse(&g_style_sheet, default_style_css);
+    fprintf(stderr, "Using built-in default CSS\n");
   }
 
   fcft_init(FCFT_LOG_COLORIZE_AUTO, 0, FCFT_LOG_CLASS_ERROR);

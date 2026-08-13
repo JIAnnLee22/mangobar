@@ -106,6 +106,8 @@ extern MangoConfig g_cfg;
 void mango_config_defaults(void);
 // Load config from JSONC; returns 0 on success
 int mango_config_load(const char *path);
+// Parse JSONC config from a string; returns 0 on success
+int mango_config_parse(const char *jsonc);
 // Search order: $MANGOBAR_CONFIG, ~/.config/mangobar/config.jsonc
 const char *mango_config_find_default(char *buf, size_t sz);
 

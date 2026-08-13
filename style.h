@@ -66,6 +66,8 @@ void style_sheet_init(StyleSheet *ss);
 
 // Load CSS from file; 0 on success, -1 on failure
 int style_sheet_load(StyleSheet *ss, const char *path);
+// Parse CSS text into the style sheet; returns 0 on success
+int style_sheet_parse(StyleSheet *ss, const char *buf);
 
 // Resolve final style for module+state in cascade order:
 // "*", "#module", "#module.state"; later rules override earlier ones

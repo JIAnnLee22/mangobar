@@ -50,8 +50,21 @@ xdg_output_c = gen_code.process(xdg_output_xml)
 wlr_layer_h = gen_header.process(wlr_layer_xml)
 wlr_layer_c = gen_code.process(wlr_layer_xml)
 
+defaults_h = custom_target('defaults-h',
+  output: 'defaults.h',
+  input: ['config.jsonc', 'style.css'],
+  command: [
+    find_program('python3'),
+    files('scripts/gen_defaults.py'),
+    '@INPUT0@',
+    '@INPUT1@',
+    '@OUTPUT@',
+  ],
+)
+
 executable('mangobar',
   sources: [
+    defaults_h,
     xdg_shell_h, xdg_shell_c,
     xdg_output_h, xdg_output_c,
     wlr_layer_h, wlr_layer_c,

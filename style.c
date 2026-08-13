@@ -344,26 +344,7 @@ static void parse_selector(const char *sel, char *module, size_t msz,
   }
 }
 
-int style_sheet_load(StyleSheet *ss, const char *path) {
-  FILE *f = fopen(path, "r");
-  if (!f)
-    return -1;
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz < 0) {
-    fclose(f);
-    return -1;
-  }
-  char *buf = malloc((size_t)sz + 1);
-  if (!buf) {
-    fclose(f);
-    return -1;
-  }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
-  buf[rd] = '\0';
-  fclose(f);
-
+int style_sheet_parse(StyleSheet *ss, const char *buf) {
   const char *p = buf;
   for (;;) {
     skip_ws_comments(&p);
@@ -497,9 +478,32 @@ int style_sheet_load(StyleSheet *ss, const char *path) {
     }
     free(cs);
   }
-  free(buf);
   ss->loaded = true;
   return 0;
+}
+
+int style_sheet_load(StyleSheet *ss, const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return -1;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz < 0) {
+    fclose(f);
+    return -1;
+  }
+  char *buf = malloc((size_t)sz + 1);
+  if (!buf) {
+    fclose(f);
+    return -1;
+  }
+  size_t rd = fread(buf, 1, (size_t)sz, f);
+  buf[rd] = '\0';
+  fclose(f);
+  int ret = style_sheet_parse(ss, buf);
+  free(buf);
+  return ret;
 }
 
 static void apply_rule(Style *dst, const StyleRule *r) {
