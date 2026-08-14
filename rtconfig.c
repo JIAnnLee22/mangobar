@@ -90,6 +90,21 @@ static void cfg_str(cJSON *obj, const char *key, char *dst, size_t sz) {
     cfg_set(dst, sz, v->valuestring);
 }
 
+static void cfg_icons(cJSON *obj, const char *key, char icons[][16],
+                      int *count, int max) {
+  *count = 0;
+  cJSON *arr = cJSON_GetObjectItemCaseSensitive(obj, key);
+  if (!cJSON_IsArray(arr))
+    return;
+  cJSON *item;
+  cJSON_ArrayForEach(item, arr) {
+    if (*count >= max)
+      break;
+    if (cJSON_IsString(item))
+      snprintf(icons[(*count)++], 16, "%s", item->valuestring);
+  }
+}
+
 static int module_id(const char *name) {
   if (!name)
     return M_NONE;
@@ -403,6 +418,8 @@ static void parse_module_configs(cJSON *root) {
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.brightness_fmt,
             sizeof(g_cfg.brightness_fmt));
+    cfg_icons(m, "icons", g_cfg.brightness_icons,
+              &g_cfg.brightness_icon_count, MANGOBAR_MAX_ICONS);
     cfg_alt(m, "brightness");
     cfg_str(m, "device", g_cfg.brightness_dev,
             sizeof(g_cfg.brightness_dev));
@@ -419,6 +436,12 @@ static void parse_module_configs(cJSON *root) {
     cfg_str(m, "format", g_cfg.volume_fmt, sizeof(g_cfg.volume_fmt));
     cfg_str(m, "format-muted", g_cfg.volume_fmt_muted,
             sizeof(g_cfg.volume_fmt_muted));
+    cfg_str(m, "icon-muted", g_cfg.volume_muted_icon,
+            sizeof(g_cfg.volume_muted_icon));
+    cfg_str(m, "icon-bluetooth", g_cfg.volume_bt_icon,
+            sizeof(g_cfg.volume_bt_icon));
+    cfg_icons(m, "icons", g_cfg.volume_icons, &g_cfg.volume_icon_count,
+              MANGOBAR_MAX_ICONS);
     cfg_alt(m, "volume");
     set_action("volume",
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
@@ -509,6 +532,8 @@ static void parse_module_configs(cJSON *root) {
             sizeof(g_cfg.battery_icon_discharging));
     cfg_str(m, "icon-ac", g_cfg.battery_icon_ac,
             sizeof(g_cfg.battery_icon_ac));
+    cfg_icons(m, "icons", g_cfg.battery_icons, &g_cfg.battery_icon_count,
+              MANGOBAR_MAX_ICONS);
     g_cfg.hide_on_ac = cfg_bool(m, "hide-on-ac", false);
     cfg_alt(m, "battery");
     set_action("battery",
@@ -574,6 +599,36 @@ void mango_config_defaults(void) {
   snprintf(g_cfg.battery_icon_discharging,
            sizeof(g_cfg.battery_icon_discharging), "%s", "󰁿");
   snprintf(g_cfg.battery_icon_ac, sizeof(g_cfg.battery_icon_ac), "%s", "");
+  static const char *battery_level_icons[] = {
+      "󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"};
+  g_cfg.battery_icon_count = 0;
+  for (size_t i = 0;
+       i < sizeof(battery_level_icons) / sizeof(battery_level_icons[0]) &&
+       g_cfg.battery_icon_count < MANGOBAR_MAX_ICONS;
+       i++)
+    snprintf(g_cfg.battery_icons[g_cfg.battery_icon_count++], 16, "%s",
+             battery_level_icons[i]);
+  static const char *brightness_level_icons[] = {
+      "󰃚", "󰃛", "󰃜", "󰃝", "󰃞", "󰃟"};
+  g_cfg.brightness_icon_count = 0;
+  for (size_t i = 0;
+       i < sizeof(brightness_level_icons) /
+                sizeof(brightness_level_icons[0]) &&
+       g_cfg.brightness_icon_count < MANGOBAR_MAX_ICONS;
+       i++)
+    snprintf(g_cfg.brightness_icons[g_cfg.brightness_icon_count++], 16, "%s",
+             brightness_level_icons[i]);
+  static const char *volume_level_icons[] = {"󰝟", "󰕿", "󰕾"};
+  g_cfg.volume_icon_count = 0;
+  for (size_t i = 0;
+       i < sizeof(volume_level_icons) / sizeof(volume_level_icons[0]) &&
+       g_cfg.volume_icon_count < MANGOBAR_MAX_ICONS;
+       i++)
+    snprintf(g_cfg.volume_icons[g_cfg.volume_icon_count++], 16, "%s",
+             volume_level_icons[i]);
+  snprintf(g_cfg.volume_muted_icon, sizeof(g_cfg.volume_muted_icon), "%s",
+           "󰝟");
+  snprintf(g_cfg.volume_bt_icon, sizeof(g_cfg.volume_bt_icon), "%s", "󰂯");
   add_action("tags", "@view", NULL, NULL, NULL, NULL);
   add_action("volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
   add_action("brightness", NULL, NULL, NULL, "brightnessctl s +5%",

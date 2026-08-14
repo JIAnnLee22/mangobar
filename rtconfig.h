@@ -10,6 +10,7 @@
 #define MANGOBAR_MAX_MODULES 16
 #define MANGOBAR_MAX_CUSTOM 16
 #define MANGOBAR_MAX_ALTS 48
+#define MANGOBAR_MAX_ICONS 12
 
 enum MangoModule {
   M_NONE = 0,
@@ -93,6 +94,14 @@ typedef struct {
   char battery_icon_full[16];
   char battery_icon_discharging[16];
   char battery_icon_ac[16];
+  char battery_icons[MANGOBAR_MAX_ICONS][16];
+  int battery_icon_count;
+  char brightness_icons[MANGOBAR_MAX_ICONS][16];
+  int brightness_icon_count;
+  char volume_icons[MANGOBAR_MAX_ICONS][16];
+  int volume_icon_count;
+  char volume_muted_icon[16];
+  char volume_bt_icon[16];
   bool hide_on_ac;
   int left_order[MANGOBAR_MAX_MODULES];
   int left_count;

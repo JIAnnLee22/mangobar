@@ -299,6 +299,53 @@ static void format_battery(const char *fmt, int percent, const char *status,
   out[o] = '\0';
 }
 
+// Pick an icon from a level array based on percent (0..100)
+static const char *level_icon(const char icons[][16], int count, int pct) {
+  if (count <= 0)
+    return "";
+  int idx = pct * count / 101;
+  if (idx >= count)
+    idx = count - 1;
+  if (idx < 0)
+    idx = 0;
+  return icons[idx];
+}
+
+// Volume format: {volume}/{percent}/{icon} plus {bt} (bluetooth sink)
+static void format_volume(const char *fmt, int pct, const char *icon,
+                          const char *bt, char *out, size_t outsz) {
+  char p[16];
+  snprintf(p, sizeof(p), "%d", pct);
+  size_t o = 0;
+  const char *q = fmt ? fmt : "";
+  while (*q && o + 1 < outsz) {
+    if (q[0] == '{' && q[1] == '}') {
+      o += snprintf(out + o, outsz - o, "%s", p);
+      q += 2;
+    } else if (strncmp(q, "{volume}", 8) == 0 ||
+               strncmp(q, "{percent}", 9) == 0) {
+      int n = strncmp(q, "{volume}", 8) == 0 ? 8 : 9;
+      o += snprintf(out + o, outsz - o, "%s", p);
+      q += n;
+    } else if (strncmp(q, "{icon}", 6) == 0) {
+      o += snprintf(out + o, outsz - o, "%s", icon ? icon : "");
+      q += 6;
+    } else if (strncmp(q, "{bluetooth}", 11) == 0 ||
+               strncmp(q, "{bt}", 4) == 0) {
+      int n = strncmp(q, "{bluetooth}", 11) == 0 ? 11 : 4;
+      if (bt && *bt)
+        o += snprintf(out + o, outsz - o, "%s", bt);
+      else
+        while (o > 0 && out[o - 1] == ' ')
+          o--;
+      q += n;
+    } else {
+      out[o++] = *q++;
+    }
+  }
+  out[o] = '\0';
+}
+
 // Speed units: KB/s under 1MB/s, otherwise MB/s
 static void format_speed(double kbps, char *out, size_t outsz) {
   if (kbps >= 1024.0)
@@ -373,6 +420,7 @@ typedef struct {
   bool battery_present;
   bool battery_on_ac;
   char battery_status[16];
+  bool volume_bt;
   int brightness_pct, volume_pct;
   bool volume_muted;
   char time_str[16];
@@ -415,6 +463,8 @@ static pa_mainloop *pa_ml;
 static pa_context *pa_ctx;
 static atomic_int pa_pct = -1;
 static atomic_int pa_muted = -1;
+static atomic_int pa_sink_bt;
+static atomic_int pa_source_bt;
 static atomic_bool pa_dirty;
 static int pulse_event_fd = -1;
 static pthread_t pulse_thread;
@@ -568,6 +618,17 @@ static void ensure_numeric_min_width(ModuleStyle *st, const char *fmt,
   format_value(fmt, "88", icon ? icon : "", tmp, sizeof(tmp));
   int32_t mn, mx;
   uint32_t tw = text_metrics(tmp, &mn, &mx);
+  int need = (int)tw + st->pad_l + st->pad_r + st->margin_l + st->margin_r;
+  if (need > st->min_width)
+    st->min_width = need;
+}
+
+// Reserve min width from an already-formatted sample string.
+static void ensure_module_min_width(ModuleStyle *st, const char *text) {
+  if (!text || !*text)
+    return;
+  int32_t mn, mx;
+  uint32_t tw = text_metrics(text, &mn, &mx);
   int need = (int)tw + st->pad_l + st->pad_r + st->margin_l + st->margin_r;
   if (need > st->min_width)
     st->min_width = need;
@@ -935,15 +996,20 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                              "");
     break;
   case M_BRIGHTNESS:
-    dst = texts[(*text_n)++];
-    format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
-               bar->brightness_pct, "☀", dst, 256);
-    ents[n++] = (ModuleEntry){.text = dst, .st = &st_brightness,
-                              .module = "brightness", .tag = -1};
-    ensure_numeric_min_width(&st_brightness,
-                             module_fmt("brightness", g_cfg.brightness_fmt,
-                                        bar),
-                             "☀");
+    {
+      const char *bicon = level_icon(g_cfg.brightness_icons,
+                                     g_cfg.brightness_icon_count,
+                                     bar->brightness_pct);
+      dst = texts[(*text_n)++];
+      format_int(module_fmt("brightness", g_cfg.brightness_fmt, bar),
+                 bar->brightness_pct, bicon, dst, 256);
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_brightness,
+                                .module = "brightness", .tag = -1};
+      ensure_numeric_min_width(&st_brightness,
+                               module_fmt("brightness",
+                                          g_cfg.brightness_fmt, bar),
+                               bicon);
+    }
     break;
   case M_VOLUME:
     {
@@ -952,20 +1018,31 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       const char *icon;
       if (ai >= 0 && bar->alt_on[ai]) {
         fmt = g_cfg.alts[ai].fmt;
-        icon = "";
+        icon = level_icon(g_cfg.volume_icons, g_cfg.volume_icon_count,
+                          bar->volume_pct);
       } else if (bar->volume_muted) {
         fmt = g_cfg.volume_fmt_muted;
-        icon = "🔇";
+        icon = g_cfg.volume_muted_icon;
       } else {
         fmt = g_cfg.volume_fmt;
-        icon = "";
+        icon = level_icon(g_cfg.volume_icons, g_cfg.volume_icon_count,
+                          bar->volume_pct);
       }
       dst = texts[(*text_n)++];
-      format_int(fmt, bar->volume_pct, icon, dst, 256);
+      format_volume(fmt, bar->volume_pct, icon,
+                    bar->volume_bt ? g_cfg.volume_bt_icon : "", dst, 256);
       ents[n++] = (ModuleEntry){.text = dst, .st = &st_volume,
                                 .module = "volume", .tag = -1};
-      ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt, "");
-      ensure_numeric_min_width(&st_volume, g_cfg.volume_fmt_muted, "🔇");
+      // Reserve room for two-digit values, but never for the {bt} mark.
+      char wt[256];
+      format_volume(g_cfg.volume_fmt, 88,
+                    level_icon(g_cfg.volume_icons, g_cfg.volume_icon_count,
+                               bar->volume_pct),
+                    "", wt, sizeof(wt));
+      ensure_module_min_width(&st_volume, wt);
+      format_volume(g_cfg.volume_fmt_muted, 88, g_cfg.volume_muted_icon, "",
+                    wt, sizeof(wt));
+      ensure_module_min_width(&st_volume, wt);
     }
     break;
   case M_CLOCK_TIME:
@@ -1030,7 +1107,8 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
       else if (strncmp(bar->battery_status, "Full", 4) == 0)
         icon = g_cfg.battery_icon_full;
       else
-        icon = g_cfg.battery_icon_discharging;
+        icon = level_icon(g_cfg.battery_icons, g_cfg.battery_icon_count,
+                          bar->battery_pct);
       dst = texts[(*text_n)++];
       format_battery(module_fmt("battery", g_cfg.battery_fmt, bar),
                      bar->battery_pct, bar->battery_status, icon,
@@ -3073,13 +3151,35 @@ static void pulse_sink_cb(pa_context *c, const pa_sink_info *i, int eol,
   int pct = (int)((avg * 100) / PA_VOLUME_NORM);
   atomic_store(&pa_pct, pct < 0 ? 0 : (pct > 100 ? 100 : pct));
   atomic_store(&pa_muted, i->mute ? 1 : 0);
+  int bt = 0;
+  const char *api = i->proplist ? pa_proplist_gets(i->proplist, "device.api")
+                                : NULL;
+  if ((api && strstr(api, "bluez")) ||
+      (i->name && strstr(i->name, "bluez")))
+    bt = 1;
+  atomic_store(&pa_sink_bt, bt);
   atomic_store(&pa_dirty, true);
-  IPC_LOG("[pulse] sink pct=%d muted=%d\n", atomic_load(&pa_pct),
-          atomic_load(&pa_muted));
+  IPC_LOG("[pulse] sink pct=%d muted=%d bt=%d\n", atomic_load(&pa_pct),
+          atomic_load(&pa_muted), bt);
   if (pulse_event_fd >= 0) {
     uint64_t one = 1;
     (void)write(pulse_event_fd, &one, sizeof(one));
   }
+}
+
+// Source callback: track whether the active input is bluetooth
+static void pulse_source_cb(pa_context *c, const pa_source_info *i, int eol,
+                            void *userdata) {
+  if (!i)
+    return;
+  int bt = 0;
+  const char *api = i->proplist ? pa_proplist_gets(i->proplist, "device.api")
+                                : NULL;
+  if ((api && strstr(api, "bluez")) ||
+      (i->name && strstr(i->name, "bluez")))
+    bt = 1;
+  atomic_store(&pa_source_bt, bt);
+  IPC_LOG("[pulse] source bt=%d\n", bt);
 }
 
 static void pulse_query(void) {
@@ -3089,12 +3189,17 @@ static void pulse_query(void) {
       pa_context_get_sink_info_by_name(pa_ctx, NULL, pulse_sink_cb, NULL);
   if (op)
     pa_operation_unref(op);
+  op = pa_context_get_source_info_by_name(pa_ctx, NULL, pulse_source_cb, NULL);
+  if (op)
+    pa_operation_unref(op);
 }
 
 static void pulse_state_cb(pa_context *c, void *userdata) {
   IPC_LOG("[pulse] state=%d\n", pa_context_get_state(c));
   if (pa_context_get_state(c) == PA_CONTEXT_READY) {
-    pa_context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK, NULL, NULL);
+    pa_context_subscribe(c,
+                         PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE,
+                         NULL, NULL);
     pulse_query();
   }
 }
@@ -3103,7 +3208,8 @@ static void pulse_subscribe_cb(pa_context *c,
                                pa_subscription_event_type_t t, uint32_t idx,
                                void *userdata) {
   IPC_LOG("[pulse] event type=%u\n", t);
-  if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK)
+  if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK ||
+      (t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SOURCE)
     pulse_query();
 }
 
@@ -3113,6 +3219,8 @@ static void pulse_reconnect(void) {
     return;
   atomic_store(&pa_pct, -1);
   atomic_store(&pa_muted, -1);
+  atomic_store(&pa_sink_bt, 0);
+  atomic_store(&pa_source_bt, 0);
   if (pa_ctx) {
     pa_context_disconnect(pa_ctx);
     pa_context_unref(pa_ctx);
@@ -3216,6 +3324,7 @@ static void update_volume() {
   wl_list_for_each(bar, &bar_list, link) {
     bar->volume_pct = pct >= 0 ? pct : 0;
     bar->volume_muted = muted == 1;
+    bar->volume_bt = atomic_load(&pa_sink_bt) || atomic_load(&pa_source_bt);
   }
 }
 

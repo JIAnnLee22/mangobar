@@ -102,11 +102,15 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
   (KB/s below 1MB/s, MB/s otherwise)
 - `hideclients`: shows the hidden-window count for the monitor; the module
   hides itself while the count is zero
-- `battery`: shows charge percent and status (`{percent}`, `{status}`,
-  `{icon}`); the status icons are configurable via `icon-charging`,
-  `icon-full` and `icon-discharging`; `{ac}` shows the plug icon
-  (`icon-ac`, default ``) while a power adapter is plugged in;
-  `"hide-on-ac": true` hides the module entirely in that case
+- `battery`: charge percent and status (`{percent}`, `{status}`, `{icon}`);
+  `"icons"` is an array of nerd-font icons shown by charge level while
+  discharging, `icon-charging` / `icon-full` override the charging/full
+  states, and `{ac}` / `icon-ac` mark a plugged-in adapter;
+  `"hide-on-ac": true` hides the module entirely while plugged in
+- `brightness` / `volume`: `"icons"` arrays switch the `{icon}` by level
+  (e.g. `["󰃚", "󰃛", "󰃜", "󰃝", "󰃞", "󰃟"]`); volume also has `icon-muted`
+  and `{bt}` / `icon-bluetooth` to show a bluetooth mark when the active
+  sink is a bluetooth device
 - `tray`: StatusNotifierItem / DBusMenu, with a side-opening submenu
 - `custom/<name>`: user-defined modules (see below)
 

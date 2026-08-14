@@ -56,22 +56,25 @@
     },
     "backlight": {
         "format": "{icon} {percent}%",
+        "icons": ["󰃚", "󰃛", "󰃜", "󰃝", "󰃞", "󰃟"],
         "on-scroll-up": "bash ~/.config/mango/scripts/brightness.sh bup",
         "on-scroll-down": "bash ~/.config/mango/scripts/brightness.sh bdown",
         "on-click": "brightnessctl set 1%"
     },
     "pulseaudio": {
-        "format": "{icon} {volume}%",
-        "format-muted": "󰝟 {volume}%",
+        "format": "{icon} {volume}% {bt}",
+        "format-muted": "󰝟 {volume}% {bt}",
+        "icons": ["󰝟", "󰕿", "󰕾"],
+        // "icon-bluetooth": "󰂯",
         "on-click": "pamixer -t",
         "on-scroll-up": "pamixer -i 2",
         "on-scroll-down": "pamixer -d 2"
     },
     "battery": {
         "format": "{icon} {percent}% {ac}",
+        "icons": ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
         // "icon-charging": "󰂄",
         // "icon-full": "󰁹",
-        // "icon-discharging": "󰁿",
         // "icon-ac": "",
         // "hide-on-ac": true
     },
