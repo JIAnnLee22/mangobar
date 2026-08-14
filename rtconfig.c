@@ -174,6 +174,7 @@ static void add_action(const char *module, const char *left,
   cfg_set(a->right, sizeof(a->right), right);
   cfg_set(a->scroll_up, sizeof(a->scroll_up), scroll_up);
   cfg_set(a->scroll_down, sizeof(a->scroll_down), scroll_down);
+  a->scroll_interval = -1;
   g_cfg.action_count++;
 }
 
@@ -210,6 +211,29 @@ static void set_alt(const char *module, const char *fmt) {
   MangoAltFormat *a = &g_cfg.alts[g_cfg.alt_count++];
   snprintf(a->module, sizeof(a->module), "%s", module);
   cfg_set(a->fmt, sizeof(a->fmt), fmt);
+}
+
+static void set_action_interval(const char *module, cJSON *m) {
+  cJSON *iv = cJSON_GetObjectItemCaseSensitive(m, "scroll-interval");
+  if (cJSON_IsNumber(iv)) {
+    for (int i = 0; i < g_cfg.action_count; i++) {
+      if (strcmp(g_cfg.actions[i].module, module) == 0) {
+        g_cfg.actions[i].scroll_interval = iv->valueint;
+        break;
+      }
+    }
+  }
+}
+
+// Register all click/scroll actions of a module block at once.
+static void set_module_actions(cJSON *m, const char *module) {
+  set_action(module,
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  set_action_interval(module, m);
 }
 
 static void cfg_alt(cJSON *m, const char *module) {
@@ -361,7 +385,11 @@ static void parse_module_configs(cJSON *root) {
                    cJSON_GetObjectItemCaseSensitive(m, "on-click-right")
                        ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right"))
                        : NULL),
-               NULL, NULL);
+               cJSON_GetStringValue(
+                   cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(
+                   cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+    set_action_interval("tags", m);
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "layout");
@@ -370,6 +398,7 @@ static void parse_module_configs(cJSON *root) {
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.layout_format, sizeof(g_cfg.layout_format));
     cfg_alt(m, "layout");
+    set_module_actions(m, "layout");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "window");
@@ -378,18 +407,7 @@ static void parse_module_configs(cJSON *root) {
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.title_format, sizeof(g_cfg.title_format));
     cfg_alt(m, "title");
-    set_action(
-        "title",
-        cJSON_GetObjectItemCaseSensitive(m, "on-click")
-            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click"))
-            : NULL,
-        cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")
-            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle"))
-            : NULL,
-        cJSON_GetObjectItemCaseSensitive(m, "on-click-right")
-            ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right"))
-            : NULL,
-        NULL, NULL);
+    set_module_actions(m, "title");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "keymode");
@@ -398,6 +416,7 @@ static void parse_module_configs(cJSON *root) {
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.keymode_format, sizeof(g_cfg.keymode_format));
     cfg_alt(m, "keymode");
+    set_module_actions(m, "keymode");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "keyboardlayout");
@@ -409,6 +428,7 @@ static void parse_module_configs(cJSON *root) {
     cfg_str(m, "format", g_cfg.keyboardlayout_format,
             sizeof(g_cfg.keyboardlayout_format));
     cfg_alt(m, "keyboardlayout");
+    set_module_actions(m, "keyboardlayout");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "tray");
@@ -490,6 +510,7 @@ static void parse_module_configs(cJSON *root) {
       convert_clock_format(alt, conv, sizeof(conv));
       set_alt("clock", conv);
     }
+    set_module_actions(m, "clock");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "clock#date");
@@ -506,6 +527,7 @@ static void parse_module_configs(cJSON *root) {
       convert_clock_format(alt, conv, sizeof(conv));
       set_alt("clock.date", conv);
     }
+    set_module_actions(m, "clock.date");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "clock");
@@ -522,12 +544,14 @@ static void parse_module_configs(cJSON *root) {
       convert_clock_format(alt, conv, sizeof(conv));
       set_alt("clock", conv);
     }
+    set_module_actions(m, "clock");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "network");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", g_cfg.network_format, sizeof(g_cfg.network_format));
     cfg_alt(m, "network");
+    set_module_actions(m, "network");
   }
 
   m = cJSON_GetObjectItemCaseSensitive(root, "hideclients");
@@ -713,6 +737,9 @@ int mango_config_parse(const char *jsonc) {
   if ((v = cJSON_GetObjectItemCaseSensitive(root, "buffer-scale")) &&
       cJSON_IsNumber(v) && v->valueint > 0)
     g_cfg.buffer_scale = v->valueint;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "scroll-interval")) &&
+      cJSON_IsNumber(v) && v->valueint >= 0)
+    g_cfg.scroll_interval = v->valueint;
   if ((v = cJSON_GetObjectItemCaseSensitive(root, "layer")) &&
       cJSON_IsString(v)) {
     if (strcmp(v->valuestring, "overlay") == 0)

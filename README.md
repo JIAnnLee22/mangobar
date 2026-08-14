@@ -76,6 +76,12 @@ example. Any module can be placed in `modules-left`, `modules-center` or
 `modules-right`; left is anchored to the left edge, right to the right edge
 and center is centered between them.
 
+`scroll-interval` (ms, default `0` = disabled) debounces scroll actions per
+module: repeated scrolls inside the interval keep resetting the timer, so a
+continuous scroll only triggers once. It can be set at the top level or in a
+module block (`"workspaces": { ..., "scroll-interval": 100 }`), where the
+module value wins.
+
 `buffer-scale` is a multiplier on top of the output's Wayland scale
 (default `1`); leave it at `1` to follow the display's HiDPI scale
 automatically. Text, icons and menus are rendered at the effective scale

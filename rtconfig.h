@@ -49,6 +49,7 @@ typedef struct {
   char right[256];
   char scroll_up[256];
   char scroll_down[256];
+  int scroll_interval; // ms; -1 = use the global setting
 } MangoAction;
 
 typedef struct {
@@ -64,6 +65,7 @@ typedef struct {
   int max_title_len;
   int sys_interval;
   int tag_count;
+  int scroll_interval; // ms; 0 disables scroll debounce
   char font[256]; // fallback font when CSS sets none
   char tag_names[MANGOBAR_MAX_TAGS][16];
   uint32_t pinned_tags; // bitmask of tags always shown

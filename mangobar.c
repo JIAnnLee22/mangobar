@@ -1869,6 +1869,37 @@ static const MangoAction *find_action(const char *module) {
   return NULL;
 }
 
+// Per-module scroll debounce: scrolls inside the interval reset the timer,
+// so a continuous scroll only triggers the first event.
+static uint64_t now_ms(void);
+#define MAX_SCROLL_TRACK 32
+static char scroll_track_module[MAX_SCROLL_TRACK][32];
+static uint64_t scroll_track_last[MAX_SCROLL_TRACK];
+static int scroll_track_count;
+
+static bool scroll_debounced(const char *module) {
+  int interval = g_cfg.scroll_interval;
+  const MangoAction *ma = find_action(module);
+  if (ma && ma->scroll_interval >= 0)
+    interval = ma->scroll_interval;
+  if (interval <= 0)
+    return false;
+  uint64_t now = now_ms();
+  for (int i = 0; i < scroll_track_count; i++) {
+    if (strcmp(scroll_track_module[i], module) == 0) {
+      bool blocked = now - scroll_track_last[i] < (uint64_t)interval;
+      scroll_track_last[i] = now; // keep resetting while scrolling
+      return blocked;
+    }
+  }
+  if (scroll_track_count < MAX_SCROLL_TRACK) {
+    snprintf(scroll_track_module[scroll_track_count], 32, "%s", module);
+    scroll_track_last[scroll_track_count] = now;
+    scroll_track_count++;
+  }
+  return false;
+}
+
 static void handle_module_action(Bar *bar, const char *module, int tag,
                                  uint32_t button) {
   // Left click toggles format-alt when the module defines one.
@@ -1898,6 +1929,8 @@ static void handle_module_action(Bar *bar, const char *module, int tag,
     return;
   IPC_LOG("[click] module=%s tag=%d button=%u cmd='%s'\n", module, tag, button,
           cmd);
+  if ((button == 4 || button == 5) && scroll_debounced(module))
+    return;
 
   if (strcmp(module, "tags") == 0 && tag < 0) {
     // Overview button
@@ -1905,7 +1938,6 @@ static void handle_module_action(Bar *bar, const char *module, int tag,
       ipc_send_command("dispatch toggleoverview\n");
       return;
     }
-    return;
   }
 
   if (tag >= 0 && strcmp(module, "tags") == 0) {
