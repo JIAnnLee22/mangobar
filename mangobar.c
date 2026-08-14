@@ -3125,7 +3125,8 @@ static void update_network(void) {
     FILE *f = fopen("/proc/net/route", "r");
     if (f) {
       char line[256];
-      fgets(line, sizeof(line), f); // header
+      if (fgets(line, sizeof(line), f) == NULL)
+        line[0] = '\0'; // header; bail out of the loop below
       while (fgets(line, sizeof(line), f)) {
         char ifn[64], dst[16];
         if (sscanf(line, "%31s %15s", ifn, dst) == 2 &&
@@ -3179,8 +3180,9 @@ static void update_network(void) {
   FILE *f = fopen("/proc/net/dev", "r");
   if (f) {
     char line[512];
-    fgets(line, sizeof(line), f);
-    fgets(line, sizeof(line), f);
+    if (fgets(line, sizeof(line), f) == NULL ||
+        fgets(line, sizeof(line), f) == NULL)
+      line[0] = '\0'; // two header lines
     while (fgets(line, sizeof(line), f)) {
       char ifn[64];
       unsigned long long r, t;
@@ -3233,7 +3235,8 @@ static void pulse_sink_cb(pa_context *c, const pa_sink_info *i, int eol,
           atomic_load(&pa_muted), bt);
   if (pulse_event_fd >= 0) {
     uint64_t one = 1;
-    (void)write(pulse_event_fd, &one, sizeof(one));
+    ssize_t wr = write(pulse_event_fd, &one, sizeof(one));
+    (void)wr;
   }
 }
 

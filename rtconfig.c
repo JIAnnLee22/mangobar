@@ -378,7 +378,7 @@ static void parse_module_configs(cJSON *root) {
       continue;
     const char *iname = module_internal_name(child->string);
     if (iname && g_cfg.max_len_count < MANGOBAR_MAX_LENS) {
-      snprintf(g_cfg.max_lens[g_cfg.max_len_count].module, 32, "%s", iname);
+      snprintf(g_cfg.max_lens[g_cfg.max_len_count].module, 32, "%.31s", iname);
       g_cfg.max_lens[g_cfg.max_len_count].max_length = ml->valueint;
       g_cfg.max_len_count++;
     }
