@@ -124,6 +124,8 @@ static int module_id(const char *name) {
     return M_NETWORK;
   if (strcmp(name, "hide_clients") == 0 || strcmp(name, "hideclients") == 0)
     return M_HIDE_CLIENTS;
+  if (strcmp(name, "battery") == 0)
+    return M_BATTERY;
   return M_NONE;
 }
 
@@ -494,6 +496,28 @@ static void parse_module_configs(cJSON *root) {
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
   }
+
+  m = cJSON_GetObjectItemCaseSensitive(root, "battery");
+  if (cJSON_IsObject(m)) {
+    cfg_str(m, "format", g_cfg.battery_fmt, sizeof(g_cfg.battery_fmt));
+    cfg_str(m, "device", g_cfg.battery_dev, sizeof(g_cfg.battery_dev));
+    cfg_str(m, "icon-charging", g_cfg.battery_icon_charging,
+            sizeof(g_cfg.battery_icon_charging));
+    cfg_str(m, "icon-full", g_cfg.battery_icon_full,
+            sizeof(g_cfg.battery_icon_full));
+    cfg_str(m, "icon-discharging", g_cfg.battery_icon_discharging,
+            sizeof(g_cfg.battery_icon_discharging));
+    cfg_str(m, "icon-ac", g_cfg.battery_icon_ac,
+            sizeof(g_cfg.battery_icon_ac));
+    g_cfg.hide_on_ac = cfg_bool(m, "hide-on-ac", false);
+    cfg_alt(m, "battery");
+    set_action("battery",
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
+               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
+  }
 }
 
 void mango_config_defaults(void) {
@@ -541,6 +565,15 @@ void mango_config_defaults(void) {
            "{ifname}");
   snprintf(g_cfg.hide_clients_format, sizeof(g_cfg.hide_clients_format), "%s",
            "{}");
+  snprintf(g_cfg.battery_fmt, sizeof(g_cfg.battery_fmt), "%s",
+           "{icon} {percent}% {status}");
+  snprintf(g_cfg.battery_icon_charging, sizeof(g_cfg.battery_icon_charging),
+           "%s", "󰂄");
+  snprintf(g_cfg.battery_icon_full, sizeof(g_cfg.battery_icon_full), "%s",
+           "󰁹");
+  snprintf(g_cfg.battery_icon_discharging,
+           sizeof(g_cfg.battery_icon_discharging), "%s", "󰁿");
+  snprintf(g_cfg.battery_icon_ac, sizeof(g_cfg.battery_icon_ac), "%s", "");
   add_action("tags", "@view", NULL, NULL, NULL, NULL);
   add_action("volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
   add_action("brightness", NULL, NULL, NULL, "brightnessctl s +5%",

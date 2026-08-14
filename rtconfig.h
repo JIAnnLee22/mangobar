@@ -27,6 +27,7 @@ enum MangoModule {
   M_KBLAYOUT,
   M_NETWORK,
   M_HIDE_CLIENTS,
+  M_BATTERY,
   M_CUSTOM = 100, // + index into g_cfg.customs
 };
 
@@ -86,6 +87,13 @@ typedef struct {
   char keyboardlayout_format[64];
   char network_format[64];
   char hide_clients_format[64];
+  char battery_dev[64];
+  char battery_fmt[64];
+  char battery_icon_charging[16];
+  char battery_icon_full[16];
+  char battery_icon_discharging[16];
+  char battery_icon_ac[16];
+  bool hide_on_ac;
   int left_order[MANGOBAR_MAX_MODULES];
   int left_count;
   int center_order[MANGOBAR_MAX_MODULES];

@@ -75,6 +75,8 @@ static const uint32_t keyboardlayout_fg_color_hex = 0xC68A93FF;
 static const uint32_t keyboardlayout_bg_color_hex = 0x201B14FF;
 static const uint32_t hide_clients_fg_color_hex = 0xC68A93FF;
 static const uint32_t hide_clients_bg_color_hex = 0x201B14FF;
+static const uint32_t battery_fg_color_hex = 0xC68A93FF;
+static const uint32_t battery_bg_color_hex = 0x201B14FF;
 static const uint32_t tray_fg_color_hex = 0xFFFFFFFF;
 static const uint32_t tray_bg_color_hex = 0x201B14FF;
 static const uint32_t overview_fg_color_hex = 0x111012FF;
@@ -183,7 +185,7 @@ typedef struct {
 // Tag states: 0=active 1=occupied 2=urgent 3=empty 4=inactive
 static ModuleStyle st_tags[5];
 static ModuleStyle st_layout, st_title, st_clock, st_clock_date, st_cpu, st_mem;
-static ModuleStyle st_network, st_hide_clients;
+static ModuleStyle st_network, st_hide_clients, st_battery;
 static ModuleStyle st_brightness, st_volume;
 static ModuleStyle st_keymode, st_keyboardlayout;
 static ModuleStyle st_custom[MANGOBAR_MAX_CUSTOM];
@@ -266,6 +268,37 @@ static void format_int(const char *fmt, int value, const char *icon, char *out,
   format_value(fmt, tmp, icon, out, outsz);
 }
 
+// Battery format: {percent}, {icon}, {status} and {ac} (plug icon)
+static void format_battery(const char *fmt, int percent, const char *status,
+                           const char *icon, const char *ac, char *out,
+                           size_t outsz) {
+  char pct[16];
+  snprintf(pct, sizeof(pct), "%d", percent);
+  size_t o = 0;
+  const char *p = fmt ? fmt : "";
+  while (*p && o + 1 < outsz) {
+    if (p[0] == '{' && p[1] == '}') {
+      o += snprintf(out + o, outsz - o, "%s", pct);
+      p += 2;
+    } else if (strncmp(p, "{percent}", 9) == 0) {
+      o += snprintf(out + o, outsz - o, "%s", pct);
+      p += 9;
+    } else if (strncmp(p, "{icon}", 6) == 0) {
+      o += snprintf(out + o, outsz - o, "%s", icon ? icon : "");
+      p += 6;
+    } else if (strncmp(p, "{status}", 8) == 0) {
+      o += snprintf(out + o, outsz - o, "%s", status ? status : "");
+      p += 8;
+    } else if (strncmp(p, "{ac}", 4) == 0) {
+      o += snprintf(out + o, outsz - o, "%s", ac ? ac : "");
+      p += 4;
+    } else {
+      out[o++] = *p++;
+    }
+  }
+  out[o] = '\0';
+}
+
 // Speed units: KB/s under 1MB/s, otherwise MB/s
 static void format_speed(double kbps, char *out, size_t outsz) {
   if (kbps >= 1024.0)
@@ -336,6 +369,10 @@ typedef struct {
   int cpu_pct, mem_pct;
   double cpu_load;
   int hideclients;
+  int battery_pct;
+  bool battery_present;
+  bool battery_on_ac;
+  char battery_status[16];
   int brightness_pct, volume_pct;
   bool volume_muted;
   char time_str[16];
@@ -983,6 +1020,24 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                  bar->hideclients, "", dst, 256);
       ents[n++] = (ModuleEntry){.text = dst, .st = &st_hide_clients,
                                 .module = "hideclients", .tag = -1};
+    }
+    break;
+  case M_BATTERY:
+    if (bar->battery_present && !(g_cfg.hide_on_ac && bar->battery_on_ac)) {
+      const char *icon;
+      if (strncmp(bar->battery_status, "Charging", 8) == 0)
+        icon = g_cfg.battery_icon_charging;
+      else if (strncmp(bar->battery_status, "Full", 4) == 0)
+        icon = g_cfg.battery_icon_full;
+      else
+        icon = g_cfg.battery_icon_discharging;
+      dst = texts[(*text_n)++];
+      format_battery(module_fmt("battery", g_cfg.battery_fmt, bar),
+                     bar->battery_pct, bar->battery_status, icon,
+                     bar->battery_on_ac ? g_cfg.battery_icon_ac : "", dst,
+                     256);
+      ents[n++] = (ModuleEntry){.text = dst, .st = &st_battery,
+                                .module = "battery", .tag = -1};
     }
     break;
   case M_TRAY:
@@ -3164,6 +3219,90 @@ static void update_volume() {
   }
 }
 
+// Battery: percent + status from /sys/class/power_supply, AC online detect
+static void update_battery(void) {
+  static char dev[64];
+  static bool dev_set;
+  if (!g_cfg.battery_dev[0] && !dev_set) {
+    dev_set = true;
+    DIR *d = opendir("/sys/class/power_supply");
+    if (d) {
+      struct dirent *e;
+      while ((e = readdir(d))) {
+        char p[320], type[32] = {0};
+        snprintf(p, sizeof(p), "/sys/class/power_supply/%s/type", e->d_name);
+        FILE *f = fopen(p, "r");
+        if (f) {
+          if (fgets(type, sizeof(type), f) &&
+              strncmp(type, "Battery", 7) == 0)
+            snprintf(dev, sizeof(dev), "%.63s", e->d_name);
+          fclose(f);
+          if (dev[0])
+            break;
+        }
+      }
+      closedir(d);
+    }
+  }
+  const char *dname = g_cfg.battery_dev[0] ? g_cfg.battery_dev : dev;
+  int pct = -1;
+  bool charging = false;
+  char status[16] = "Unknown";
+  if (dname[0]) {
+    char p[320];
+    snprintf(p, sizeof(p), "/sys/class/power_supply/%s/capacity", dname);
+    FILE *f = fopen(p, "r");
+    if (f) {
+      if (fscanf(f, "%d", &pct) != 1)
+        pct = -1;
+      fclose(f);
+    }
+    snprintf(p, sizeof(p), "/sys/class/power_supply/%s/status", dname);
+    f = fopen(p, "r");
+    if (f) {
+      char st[32] = {0};
+      if (fgets(st, sizeof(st), f)) {
+        st[strcspn(st, "\n")] = '\0';
+        snprintf(status, sizeof(status), "%s", st);
+        charging = strncmp(st, "Charging", 8) == 0;
+      }
+      fclose(f);
+    }
+  }
+  bool on_ac = charging;
+  DIR *d = opendir("/sys/class/power_supply");
+  if (d) {
+    struct dirent *e;
+    while ((e = readdir(d))) {
+      char p[320], type[32] = {0};
+      snprintf(p, sizeof(p), "/sys/class/power_supply/%s/type", e->d_name);
+      FILE *f = fopen(p, "r");
+      if (f && fgets(type, sizeof(type), f) &&
+          strncmp(type, "Mains", 5) == 0) {
+        fclose(f);
+        snprintf(p, sizeof(p), "/sys/class/power_supply/%s/online", e->d_name);
+        f = fopen(p, "r");
+        if (f) {
+          int on = 0;
+          if (fscanf(f, "%d", &on) == 1 && on)
+            on_ac = true;
+          fclose(f);
+        }
+      } else if (f) {
+        fclose(f);
+      }
+    }
+    closedir(d);
+  }
+  Bar *b;
+  wl_list_for_each(b, &bar_list, link) {
+    b->battery_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+    b->battery_present = pct >= 0;
+    b->battery_on_ac = on_ac;
+    snprintf(b->battery_status, sizeof(b->battery_status), "%s", status);
+  }
+}
+
 static void update_system_info() {
   uint64_t ms = now_ms();
   // CPU percentage is a rate; skip sampling on very short windows so
@@ -3220,6 +3359,7 @@ static void update_system_info() {
   }
   update_brightness();
   update_volume();
+  update_battery();
   update_network();
   time_t now = time(NULL);
   struct tm *tm = localtime(&now);
@@ -3473,7 +3613,7 @@ static void init_styles() {
                         &st_title,   &st_clock,   &st_clock_date, &st_cpu,
                         &st_mem,     &st_brightness, &st_volume,
                         &st_keymode, &st_keyboardlayout, &st_network,
-                        &st_hide_clients, &st_overview,
+                        &st_hide_clients, &st_battery, &st_overview,
                         &st_separator, &st_tray, &st_bar, &st_bar_sel};
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
     all[i]->radius = g_cfg.radius_default;
@@ -3525,6 +3665,8 @@ static void init_styles() {
   hex_to_pixman(clock_bg_color_hex, &st_network.bg);
   hex_to_pixman(hide_clients_fg_color_hex, &st_hide_clients.fg);
   hex_to_pixman(hide_clients_bg_color_hex, &st_hide_clients.bg);
+  hex_to_pixman(battery_fg_color_hex, &st_battery.fg);
+  hex_to_pixman(battery_bg_color_hex, &st_battery.bg);
 
   hex_to_pixman(tray_fg_color_hex, &st_tray.fg);
   hex_to_pixman(tray_bg_color_hex, &st_tray.bg);
@@ -3561,6 +3703,7 @@ static void init_styles() {
   apply_css(&st_keyboardlayout, "keyboardlayout", NULL);
   apply_css(&st_network, "network", NULL);
   apply_css(&st_hide_clients, "hideclients", NULL);
+  apply_css(&st_battery, "battery", NULL);
   apply_css(&st_overview, "overview", NULL);
   apply_css(&st_separator, "separator", NULL);
   apply_css(&st_tray, "tray", NULL);
