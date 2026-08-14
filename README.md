@@ -91,6 +91,8 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 ## Modules
 
 - `tags` / `layout` / `title` / `keymode` / `keyboardlayout`: from mangowm IPC
+  (`workspaces` also accepts `pinned` — tag numbers kept visible even when
+  empty — and `tag-names`, an array of custom labels, index 0 = tag 1)
 - `cpu`: `{usage}` is the CPU usage percent and `{load}` is the 1-minute
   load average (two decimals); `mem` reads `/proc`
 - `brightness`: read `/sys/class/backlight` (auto-detected or the JSONC

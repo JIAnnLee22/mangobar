@@ -65,7 +65,8 @@ typedef struct {
   int sys_interval;
   int tag_count;
   char font[256]; // fallback font when CSS sets none
-  char tag_names[MANGOBAR_MAX_TAGS][8];
+  char tag_names[MANGOBAR_MAX_TAGS][16];
+  uint32_t pinned_tags; // bitmask of tags always shown
   char overview_label[64];
   bool only_occupied;
   char separator[16];

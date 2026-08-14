@@ -942,7 +942,7 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     } else {
       for (int i = 0; i < bar->tag_count && n < max; i++) {
         if (g_cfg.only_occupied && !(bar->ctags & (1 << i)) &&
-            !(bar->atags & (1 << i)))
+            !(bar->atags & (1 << i)) && !(g_cfg.pinned_tags & (1 << i)))
           continue;
         ModuleStyle *st;
         if (bar->urg & (1 << i))

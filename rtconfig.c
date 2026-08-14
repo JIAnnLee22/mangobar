@@ -327,6 +327,31 @@ static void parse_module_configs(cJSON *root) {
     g_cfg.only_occupied = cfg_bool(m, "hide-empty", true);
     cfg_str(m, "overview-label", g_cfg.overview_label,
             sizeof(g_cfg.overview_label));
+    // Tags that stay visible even when empty (1-based numbers)
+    cJSON *pin = cJSON_GetObjectItemCaseSensitive(m, "pinned");
+    if (cJSON_IsArray(pin)) {
+      g_cfg.pinned_tags = 0;
+      cJSON *it;
+      cJSON_ArrayForEach(it, pin) {
+        if (cJSON_IsNumber(it) && it->valueint >= 1 &&
+            it->valueint <= MANGOBAR_MAX_TAGS)
+          g_cfg.pinned_tags |= (uint32_t)1 << (it->valueint - 1);
+      }
+    }
+    // Custom tag labels (index 0 = tag 1)
+    cJSON *tn = cJSON_GetObjectItemCaseSensitive(m, "tag-names");
+    if (cJSON_IsArray(tn)) {
+      int idx = 0;
+      cJSON *it;
+      cJSON_ArrayForEach(it, tn) {
+        if (idx >= MANGOBAR_MAX_TAGS)
+          break;
+        if (cJSON_IsString(it))
+          snprintf(g_cfg.tag_names[idx], sizeof(g_cfg.tag_names[idx]), "%s",
+                   it->valuestring);
+        idx++;
+      }
+    }
     set_action("tags", map_workspace_action(
                            cJSON_GetObjectItemCaseSensitive(m, "on-click")
                                ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click"))

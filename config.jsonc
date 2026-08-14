@@ -28,6 +28,8 @@
 
     "workspaces": {
         "hide-empty": true,
+        // "pinned": [1, 2],
+        // "tag-names": ["1", "2", "3", "编", "网"],
         "overview-label": "OVERVIEW",
         "on-click": "activate",
         "on-click-right": "toggle"
