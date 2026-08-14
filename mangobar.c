@@ -722,15 +722,90 @@ static void draw_tray_icon(pixman_image_t *dst, pixman_image_t *icon,
   if (!scaled)
     return;
   uint32_t *dstbuf = (uint32_t *)pixman_image_get_data(scaled);
-  for (int yy = 0; yy < ds; yy++) {
-    int sy = yy * sh / ds;
-    if (sy >= sh)
-      sy = sh - 1;
-    for (int xx = 0; xx < ds; xx++) {
-      int sx = xx * sw / ds;
-      if (sx >= sw)
-        sx = sw - 1;
-      dstbuf[yy * ds + xx] = src[sy * sw + sx];
+  if (ds >= sw && ds >= sh) {
+    // Upscale: bilinear.
+    for (int yy = 0; yy < ds; yy++) {
+      double sy = ((double)yy + 0.5) * sh / ds - 0.5;
+      if (sy < 0)
+        sy = 0;
+      int y0 = (int)sy;
+      int y1 = y0 + 1 < sh ? y0 + 1 : y0;
+      double fy = sy - y0;
+      const uint32_t *row0 = src + (size_t)y0 * sw;
+      const uint32_t *row1 = src + (size_t)y1 * sw;
+      for (int xx = 0; xx < ds; xx++) {
+        double sx = ((double)xx + 0.5) * sw / ds - 0.5;
+        if (sx < 0)
+          sx = 0;
+        int x0 = (int)sx;
+        int x1 = x0 + 1 < sw ? x0 + 1 : x0;
+        double fx = sx - x0;
+        uint32_t p00 = row0[x0], p01 = row0[x1];
+        uint32_t p10 = row1[x0], p11 = row1[x1];
+        uint32_t out[4];
+        for (int c = 0; c < 4; c++) {
+          int sh_ = (3 - c) * 8; // high byte first: A, R, G, B
+          double t =
+              ((p00 >> sh_) & 0xff) * (1 - fx) * (1 - fy) +
+              ((p01 >> sh_) & 0xff) * fx * (1 - fy) +
+              ((p10 >> sh_) & 0xff) * (1 - fx) * fy +
+              ((p11 >> sh_) & 0xff) * fx * fy;
+          out[c] = (uint32_t)(t + 0.5);
+          if (out[c] > 255)
+            out[c] = 255;
+        }
+        dstbuf[yy * ds + xx] =
+            (out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3];
+      }
+    }
+  } else {
+    // Downscale: exact area average, avoids aliasing on edges.
+    for (int yy = 0; yy < ds; yy++) {
+      double y0f = (double)yy * sh / ds;
+      double y1f = (double)(yy + 1) * sh / ds;
+      int y0 = (int)y0f;
+      int y1 = (int)ceil(y1f);
+      if (y1 > sh)
+        y1 = sh;
+      if (y1 <= y0)
+        y1 = y0 + 1;
+      for (int xx = 0; xx < ds; xx++) {
+        double x0f = (double)xx * sw / ds;
+        double x1f = (double)(xx + 1) * sw / ds;
+        int x0 = (int)x0f;
+        int x1 = (int)ceil(x1f);
+        if (x1 > sw)
+          x1 = sw;
+        if (x1 <= x0)
+          x1 = x0 + 1;
+        double area = (x1f - x0f) * (y1f - y0f);
+        double acc[4] = {0, 0, 0, 0};
+        for (int sy = y0; sy < y1; sy++) {
+          double wy = fmin((double)(sy + 1), y1f) - fmax((double)sy, y0f);
+          if (wy <= 0)
+            continue;
+          const uint32_t *row = src + (size_t)sy * sw;
+          for (int sx = x0; sx < x1; sx++) {
+            double wx = fmin((double)(sx + 1), x1f) - fmax((double)sx, x0f);
+            if (wx <= 0)
+              continue;
+            double w = wx * wy / area;
+            uint32_t p = row[sx];
+            acc[0] += ((p >> 24) & 0xff) * w;
+            acc[1] += ((p >> 16) & 0xff) * w;
+            acc[2] += ((p >> 8) & 0xff) * w;
+            acc[3] += (p & 0xff) * w;
+          }
+        }
+        uint32_t out[4];
+        for (int c = 0; c < 4; c++) {
+          out[c] = (uint32_t)(acc[c] + 0.5);
+          if (out[c] > 255)
+            out[c] = 255;
+        }
+        dstbuf[yy * ds + xx] =
+            (out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3];
+      }
     }
   }
   pixman_image_composite32(PIXMAN_OP_OVER, scaled, NULL, dst, 0, 0, 0, 0,

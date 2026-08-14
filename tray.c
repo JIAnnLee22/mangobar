@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 #define WATCHER_PATH "/StatusNotifierWatcher"
-#define DEFAULT_ICON_SIZE 22
+#define DEFAULT_ICON_SIZE 64
 
 typedef struct {
   int size;
@@ -525,14 +525,10 @@ static void reload_icon(MangobarTrayItem *sni) {
                                : sni->pixmap_count;
   if (pixmap_count > 0) {
     TrayPixmap *best = pixmaps[0];
-    int min_err = INT_MAX;
-    for (int i = 0; i < pixmap_count; i++) {
-      int e = abs(DEFAULT_ICON_SIZE - pixmaps[i]->size);
-      if (e < min_err) {
-        min_err = e;
+    // Pick the largest pixmap so downscaling stays sharp.
+    for (int i = 1; i < pixmap_count; i++)
+      if (pixmaps[i]->size > best->size)
         best = pixmaps[i];
-      }
-    }
     sni->icon = pixmap_to_pixman(best);
     sni->icon_size = best->size;
   } else if (icon_name && *icon_name) {
