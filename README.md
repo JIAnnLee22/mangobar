@@ -97,7 +97,8 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
   `device` field); updates immediately on external changes via udev
 - `volume`: read via the PulseAudio library, with ALSA fallback; shows mute
   state and updates immediately on external changes via PulseAudio events
-- `clock`: time (`#clock`) and date (`#clock.date`) with separate CSS
+- `clock`: time (`#clock`) and date (`#clock.date`) with separate CSS;
+  date names follow the system locale (e.g. Chinese month/weekday names)
 - `network`: shows the active interface name; click toggles up/down speeds
   (KB/s below 1MB/s, MB/s otherwise)
 - `hideclients`: shows the hidden-window count for the monitor; the module

@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcft/fcft.h>
 #include <fcntl.h>
+#include <locale.h>
 #include <linux/input-event-codes.h>
 #include <libudev.h>
 #include <pixman.h>
@@ -3835,6 +3836,9 @@ static void init_styles() {
 }
 
 int main() {
+  // Honor the user's locale for strftime (e.g. Chinese month/day names).
+  setlocale(LC_TIME, "");
+
   // Load external JSONC config.
   mango_config_defaults();
   char cfg_buf[512];
