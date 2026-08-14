@@ -144,6 +144,38 @@ static int module_id(const char *name) {
   return M_NONE;
 }
 
+// Map a config key ("clock#date", "custom/x", ...) to the internal module
+// name used for hotspots/actions.
+static const char *module_internal_name(const char *name) {
+  static char custom[64];
+  if (!name)
+    return NULL;
+  if (strcmp(name, "workspaces") == 0 ||
+      strcmp(name, "mango/workspaces") == 0)
+    return "tags";
+  if (strcmp(name, "layout") == 0 || strcmp(name, "mango/layout") == 0)
+    return "layout";
+  if (strcmp(name, "window") == 0 || strcmp(name, "mango/window") == 0)
+    return "title";
+  if (strcmp(name, "clock#date") == 0)
+    return "clock.date";
+  if (strcmp(name, "clock") == 0 || strcmp(name, "clock#time") == 0)
+    return "clock";
+  if (strcmp(name, "memory") == 0)
+    return "mem";
+  if (strcmp(name, "backlight") == 0)
+    return "brightness";
+  if (strcmp(name, "pulseaudio") == 0)
+    return "volume";
+  if (strcmp(name, "hideclients") == 0 || strcmp(name, "hide_clients") == 0)
+    return "hideclients";
+  if (strncmp(name, "custom/", 7) == 0) {
+    snprintf(custom, sizeof(custom), "custom-%s", name + 7);
+    return custom;
+  }
+  return name; // cpu, network, battery, keymode, keyboardlayout, tray...
+}
+
 // Convert {:L%H:%M} time format to strftime
 static void convert_clock_format(const char *in, char *out, size_t sz) {
   size_t o = 0;
@@ -335,8 +367,24 @@ static void parse_modules(cJSON *root) {
 static void parse_module_configs(cJSON *root) {
   cJSON *m;
 
-  // Custom modules live under custom/<name> keys
+  // Per-module max-length (0 = unlimited)
+  g_cfg.max_len_count = 0;
   cJSON *child;
+  cJSON_ArrayForEach(child, root) {
+    if (!cJSON_IsObject(child) || !child->string)
+      continue;
+    cJSON *ml = cJSON_GetObjectItemCaseSensitive(child, "max-length");
+    if (!cJSON_IsNumber(ml))
+      continue;
+    const char *iname = module_internal_name(child->string);
+    if (iname && g_cfg.max_len_count < MANGOBAR_MAX_LENS) {
+      snprintf(g_cfg.max_lens[g_cfg.max_len_count].module, 32, "%s", iname);
+      g_cfg.max_lens[g_cfg.max_len_count].max_length = ml->valueint;
+      g_cfg.max_len_count++;
+    }
+  }
+
+  // Custom modules live under custom/<name> keys
   cJSON_ArrayForEach(child, root) {
     if (!cJSON_IsObject(child) || !child->string)
       continue;

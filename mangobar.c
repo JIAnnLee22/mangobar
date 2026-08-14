@@ -924,6 +924,14 @@ typedef struct {
   int tray_icon_size;
 } ModuleEntry;
 
+// Per-module max display length; 0 = unlimited.
+static int module_max_length(const char *module) {
+  for (int i = 0; i < g_cfg.max_len_count; i++)
+    if (strcmp(g_cfg.max_lens[i].module, module) == 0)
+      return g_cfg.max_lens[i].max_length;
+  return 0;
+}
+
 // Fill entries for one module id; returns the number of entries added.
 static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                                  char (*texts)[256], char (*names)[96],
@@ -1152,6 +1160,15 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
   default:
     break;
   }
+  // Apply per-module max length to the formatted text (tags keep their
+  // short labels untouched).
+  for (int i = 0; i < n; i++) {
+    if (strcmp(ents[i].module, "tags") == 0)
+      continue;
+    int ml = module_max_length(ents[i].module);
+    if (ml > 0)
+      truncate_utf8_string((char *)ents[i].text, ents[i].text, 256, ml);
+  }
   return n;
 }
 
@@ -1322,7 +1339,6 @@ static void draw_bar(Bar *bar) {
   // Right group right-aligned
   uint32_t right_group_left =
       right_edge > right_total_w ? right_edge - right_total_w : 0;
-  uint32_t left_max = right_group_left;
 
   // --- Left modules (limited by right group) ---
   ModuleEntry scratch[MAX_MODULE_ENTRIES];
@@ -1333,6 +1349,24 @@ static void draw_bar(Bar *bar) {
                                     scratch, MAX_MODULE_ENTRIES,
                                     scratch_texts, scratch_names, &stext_n,
                                     &sname_n);
+  // Fixed left modules keep their natural width; the window is flexible but
+  // gets a small floor so it is squeezed instead of vanishing entirely.
+  uint32_t fixed_left_w = 0;
+  uint32_t title_w = 0;
+  for (int i = 0; i < left_n; i++) {
+    if (strcmp(scratch[i].module, "title") == 0)
+      title_w = module_entry_width(&scratch[i]);
+    else
+      fixed_left_w += module_entry_width(&scratch[i]);
+  }
+  uint32_t title_min = title_w < 48 ? title_w : 48;
+  uint32_t left_max = right_group_left;
+  uint32_t min_left = bar_left + fixed_left_w + title_min;
+  if (left_max < min_left)
+    left_max = min_left;
+  if (left_max > right_edge)
+    left_max = right_edge;
+
   uint32_t x = bar_left;
   for (int i = 0; i < left_n && x < left_max; i++) {
     const char *text = scratch[i].text;
@@ -1625,8 +1659,11 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     cJSON *a = cJSON_GetObjectItem(client, "appid");
     const char *title_str = (t && cJSON_IsString(t)) ? t->valuestring : "";
     const char *appid_str = (a && cJSON_IsString(a)) ? a->valuestring : "";
-    truncate_utf8_string(bar->title, title_str, sizeof(bar->title),
-                         g_cfg.max_title_len);
+    int tml = module_max_length("title");
+    if (tml > 0)
+      truncate_utf8_string(bar->title, title_str, sizeof(bar->title), tml);
+    else
+      snprintf(bar->title, sizeof(bar->title), "%s", title_str);
     snprintf(bar->appid, sizeof(bar->appid), "%s", appid_str);
   } else {
     bar->title[0] = '\0';

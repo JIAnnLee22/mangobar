@@ -11,6 +11,7 @@
 #define MANGOBAR_MAX_CUSTOM 16
 #define MANGOBAR_MAX_ALTS 48
 #define MANGOBAR_MAX_ICONS 12
+#define MANGOBAR_MAX_LENS 32
 
 enum MangoModule {
   M_NONE = 0,
@@ -56,6 +57,11 @@ typedef struct {
   char module[32]; /* internal module name, e.g. "cpu", "custom-power" */
   char fmt[256];   /* format-alt string */
 } MangoAltFormat;
+
+typedef struct {
+  char module[32]; /* internal module name */
+  int max_length;  /* 0 = unlimited */
+} MangoMaxLen;
 
 typedef struct {
   int bar_height;
@@ -118,6 +124,8 @@ typedef struct {
   int action_count;
   MangoAltFormat alts[MANGOBAR_MAX_ALTS];
   int alt_count;
+  MangoMaxLen max_lens[MANGOBAR_MAX_LENS];
+  int max_len_count;
   char css_path[512];
 } MangoConfig;
 
