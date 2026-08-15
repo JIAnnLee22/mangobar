@@ -61,6 +61,50 @@ automatically; install any newly added dependencies first.
 Runtime note: `pamixer` / `brightnessctl` are only needed if your
 config's click/scroll actions call them.
 
+### Nix
+
+Build the package locally with:
+
+```sh
+nix build .#mangobar
+./result/bin/mangobar
+```
+
+
+
+### Home Manager
+
+The flake exports a Home Manager module. Add it to your flake inputs and
+enable the user service:
+
+```nix
+{
+  imports = [ inputs.mangobar.homeManagerModules.default ];
+
+  services.mangobar = {
+    enable = true;
+    systemdTarget = "mango.target";
+  };
+}
+```
+
+The service starts with `graphical-session.target` by default. Set
+`systemdTarget` to your compositor's user target, such as `mango.target`.
+Override `services.mangobar.package` to use a different mangobar derivation.
+
+Set `services.mangobar.settings` to generate
+`~/.config/mangobar/config.jsonc` from a Nix attribute set, or use
+`services.mangobar.configFile` for an existing JSONC file. These options are
+mutually exclusive. Changing either configuration restarts the service during
+Home Manager activation; rebuilding the mangobar package does as well.
+
+```nix
+services.mangobar.settings = {
+  modules-left = [ "workspaces" "layout" "window" ];
+  modules-right = [ "cpu" "memory" "clock#time" ];
+};
+```
+
 ## Usage
 
 Run `mangobar` inside a mangowm session. It reads configuration from:
