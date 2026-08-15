@@ -699,21 +699,19 @@ static void record_hotspot(Bar *bar, const char *module, int tag, uint32_t x1,
                            uint32_t x2) {
   if (bar->hotspot_count >= MAX_HOTSPOTS)
     return;
-  uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
   Hotspot *h = &bar->hotspots[bar->hotspot_count++];
   snprintf(h->module, sizeof(h->module), "%s", module ? module : "");
   h->tag = tag;
-  h->x1 = x1 / s;
-  h->x2 = x2 / s;
+  h->x1 = x1;
+  h->x2 = x2;
 }
 
 static void record_tray_hotspot(Bar *bar, MangobarTrayItem *item, uint32_t x1,
                                 uint32_t x2) {
   if (bar->tray_hotspot_count >= MAX_TRAY_HOTSPOTS)
     return;
-  uint32_t s = bar->scale > 0 ? (uint32_t)bar->scale : 1;
   bar->tray_hotspots[bar->tray_hotspot_count++] =
-      (TrayHotspot){item, x1 / s, x2 / s};
+      (TrayHotspot){item, x1, x2};
 }
 
 // Draw a module (background + text + record hotspot)
