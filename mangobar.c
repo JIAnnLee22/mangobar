@@ -788,9 +788,11 @@ static uint32_t draw_module(Bar *bar, const char *module, int tag,
     }
     draw_text(text, text_x, y, fg, fg_mask, NULL, &st->fg, NULL, max_x, buf_h);
   }
-  x += mw;
-  record_hotspot(bar, module, tag, x0, x);
-  return x;
+  uint32_t end = x + mw;
+  if (end > max_x)
+    end = max_x;
+  record_hotspot(bar, module, tag, x0, end);
+  return end;
 }
 
 static int alt_index(const char *module) {
@@ -1210,7 +1212,10 @@ static void fit_text_width(const char *text, char *out, size_t outsz,
       snprintf(out, outsz, "%s", tmp);
       return;
     }
-    maxc -= 8;
+    // Step down by 8, but never skip the one-character fallback: otherwise
+    // the loop would exit at maxc == 0 and return an empty string, making
+    // the window module disappear entirely when space is tight.
+    maxc = maxc > 8 ? maxc - 8 : 1;
   }
   out[0] = '\0';
 }
@@ -1367,26 +1372,39 @@ static void draw_bar(Bar *bar) {
   // gets a small floor so it is squeezed instead of vanishing entirely.
   uint32_t fixed_left_w = 0;
   uint32_t title_w = 0;
+  bool has_title = false;
   for (int i = 0; i < left_n; i++) {
-    if (strcmp(scratch[i].module, "title") == 0)
+    if (strcmp(scratch[i].module, "title") == 0) {
       title_w = module_entry_width(&scratch[i]);
-    else
+      has_title = true;
+    } else {
       fixed_left_w += module_entry_width(&scratch[i]);
+    }
   }
-  uint32_t title_min = title_w < 48 ? title_w : 48;
+  // The left group never takes space away from the right group. The window is
+  // the only flexible module and absorbs the squeeze, so fixed modules (which
+  // may come before or after the window) keep their natural width whenever
+  // possible.
   uint32_t left_max = right_group_left;
-  uint32_t min_left = bar_left + fixed_left_w + title_min;
-  if (left_max < min_left)
-    left_max = min_left;
-  if (left_max > right_edge)
-    left_max = right_edge;
+  uint32_t title_avail = 0;
+  if (has_title) {
+    uint32_t space = 0;
+    if (left_max > bar_left && left_max - bar_left > fixed_left_w)
+      space = left_max - bar_left - fixed_left_w;
+    uint32_t title_min = title_w < 48 ? title_w : 48;
+    title_avail = space > title_min ? space : title_min;
+  }
 
   uint32_t x = bar_left;
   for (int i = 0; i < left_n && x < left_max; i++) {
     const char *text = scratch[i].text;
     char fit[256];
-    if (strcmp(scratch[i].module, "title") == 0 && left_max > x) {
-      fit_text_width(text, fit, sizeof(fit), left_max - x,
+    if (strcmp(scratch[i].module, "title") == 0 && title_avail > 0 &&
+        left_max > x) {
+      uint32_t avail = left_max - x;
+      if (avail > title_avail)
+        avail = title_avail;
+      fit_text_width(text, fit, sizeof(fit), avail,
                      scratch[i].st->pad_l + scratch[i].st->pad_r);
       text = fit;
     }
@@ -1421,16 +1439,34 @@ static void draw_bar(Bar *bar) {
                            scratch_names, &stext_n, &sname_n);
   if (center_n > 0 && right_start > left_end) {
     uint32_t cw = 0;
+    uint32_t title_w = 0;
+    bool has_title = false;
     for (int i = 0; i < center_n; i++) {
-      cw += module_entry_width(&scratch[i]);
+      uint32_t ew = module_entry_width(&scratch[i]);
+      cw += ew;
+      if (strcmp(scratch[i].module, "title") == 0) {
+        title_w = ew;
+        has_title = true;
+      }
     }
     uint32_t avail = right_start - left_end;
+    uint32_t title_avail = 0;
+    if (has_title) {
+      uint32_t fixed_w = cw - title_w;
+      uint32_t space = avail > fixed_w ? avail - fixed_w : 0;
+      uint32_t title_min = title_w < 48 ? title_w : 48;
+      title_avail = space > title_min ? space : title_min;
+    }
     uint32_t cx = cw < avail ? left_end + (avail - cw) / 2 : left_end;
     for (int i = 0; i < center_n && cx < right_start; i++) {
       const char *text = scratch[i].text;
       char fit[256];
-      if (strcmp(scratch[i].module, "title") == 0 && right_start > cx) {
-        fit_text_width(text, fit, sizeof(fit), right_start - cx,
+      if (strcmp(scratch[i].module, "title") == 0 && title_avail > 0 &&
+          right_start > cx) {
+        uint32_t ta = right_start - cx;
+        if (ta > title_avail)
+          ta = title_avail;
+        fit_text_width(text, fit, sizeof(fit), ta,
                        scratch[i].st->pad_l + scratch[i].st->pad_r);
         text = fit;
       }
