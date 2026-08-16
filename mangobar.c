@@ -2279,6 +2279,47 @@ static void menu_draw_text(cairo_t *cr, const char *text, double x, double y,
   g_object_unref(layout);
 }
 
+static int pango_text_width(const char *text);
+
+// Width reserved for a state indicator column (checkmark/radio), cached.
+static int menu_indicator_col(void) {
+  static int w = -1;
+  if (w < 0) {
+    int a = pango_text_width("✓");
+    int b = pango_text_width("●");
+    w = (a > b ? a : b) + 6;
+  }
+  return w;
+}
+
+// State indicator glyph for toggle/radio menu items, or NULL if none.
+static const char *menu_state_glyph(const MangobarMenuNode *n) {
+  if (!n)
+    return NULL;
+  const char *tt = n->toggle_type ? n->toggle_type : n->type;
+  if (!tt)
+    return NULL;
+  if (strcmp(tt, "checkmark") == 0 || strcmp(tt, "toggle") == 0)
+    return n->toggle_state > 0 ? "✓" : NULL;
+  if (strcmp(tt, "radio") == 0)
+    return n->toggle_state > 0 ? "●" : "○";
+  return NULL;
+}
+
+// Whether a menu item reserves an indicator column (stable layout when the
+// state changes between checked/unchecked).
+static int menu_indicator_gap(const MangobarMenuNode *n) {
+  if (!n)
+    return 0;
+  const char *tt = n->toggle_type ? n->toggle_type : n->type;
+  if (!tt)
+    return 0;
+  if (strcmp(tt, "checkmark") == 0 || strcmp(tt, "toggle") == 0 ||
+      strcmp(tt, "radio") == 0)
+    return menu_indicator_col();
+  return 0;
+}
+
 static void argb_to_rgb(uint32_t c, double *r, double *g, double *b) {
   // Colors are stored as 0xRRGGBBAA (see hex_to_pixman)
   *r = ((c >> 24) & 0xff) / 255.0;
@@ -2388,11 +2429,20 @@ static void draw_menu_popup(void) {
       cairo_fill(cr);
     }
     const char *label = n->label ? n->label : "";
-    if (n->enabled)
-      menu_draw_text(cr, label, MENU_PAD_H, y + 2, hov ? hov_r : it_r,
-                     hov ? hov_g : it_g, hov ? hov_b : it_b);
-    else
-      menu_draw_text(cr, label, MENU_PAD_H, y + 2, 0.5, 0.5, 0.5);
+    double lr, lg, lb;
+    if (n->enabled) {
+      lr = hov ? hov_r : it_r;
+      lg = hov ? hov_g : it_g;
+      lb = hov ? hov_b : it_b;
+    } else {
+      lr = lg = lb = 0.5;
+    }
+    int ig = menu_indicator_gap(n);
+    double tx = MENU_PAD_H + ig;
+    const char *glyph = menu_state_glyph(n);
+    if (glyph)
+      menu_draw_text(cr, glyph, MENU_PAD_H, y + 2, lr, lg, lb);
+    menu_draw_text(cr, label, tx, y + 2, lr, lg, lb);
     if (n->child_count > 0) {
       PangoLayout *l = pango_cairo_create_layout(cr);
       PangoFontDescription *fd = build_menu_font();
@@ -2402,7 +2452,7 @@ static void draw_menu_popup(void) {
       int tw, th;
       pango_layout_get_pixel_size(l, &tw, &th);
       g_object_unref(l);
-      menu_draw_text(cr, "▶", MENU_PAD_H + tw + 8, y + 2, it_r, it_g, it_b);
+      menu_draw_text(cr, "▶", tx + tw + 8, y + 2, it_r, it_g, it_b);
     }
     y += popup.item_h;
   }
@@ -2482,7 +2532,8 @@ static void menu_layout_cb(void *data) {
     const MangobarMenuNode *n = menu_visible_node(popup.menu, i);
     if (n->label) {
       int tw = pango_text_width(n->label);
-      int need = tw + MENU_PAD_H * 2 + (n->child_count > 0 ? 20 : 8);
+      int need = tw + menu_indicator_gap(n) + MENU_PAD_H * 2 +
+                 (n->child_count > 0 ? 20 : 8);
       if (need > (int)w)
         w = (uint32_t)need;
     }
@@ -2620,11 +2671,20 @@ static void draw_submenu(void) {
       cairo_fill(cr);
     }
     const char *label = n ? n->label : "";
-    if (n && n->enabled)
-      menu_draw_text(cr, label, MENU_PAD_H, y + 2, hov ? hov_r : it_r,
-                     hov ? hov_g : it_g, hov ? hov_b : it_b);
-    else
-      menu_draw_text(cr, label, MENU_PAD_H, y + 2, 0.5, 0.5, 0.5);
+    double lr, lg, lb;
+    if (n && n->enabled) {
+      lr = hov ? hov_r : it_r;
+      lg = hov ? hov_g : it_g;
+      lb = hov ? hov_b : it_b;
+    } else {
+      lr = lg = lb = 0.5;
+    }
+    int ig = menu_indicator_gap(n);
+    double tx = MENU_PAD_H + ig;
+    const char *glyph = menu_state_glyph(n);
+    if (glyph)
+      menu_draw_text(cr, glyph, MENU_PAD_H, y + 2, lr, lg, lb);
+    menu_draw_text(cr, label, tx, y + 2, lr, lg, lb);
     y += popup.item_h;
   }
 
@@ -2678,7 +2738,7 @@ static void submenu_open(const MangobarMenuNode *node) {
     const MangobarMenuNode *n = menu_node_visible_node(node, i);
     if (n && n->label) {
       int tw = pango_text_width(n->label);
-      int need = tw + MENU_PAD_H * 2 + 8;
+      int need = tw + menu_indicator_gap(n) + MENU_PAD_H * 2 + 8;
       if (need > (int)w)
         w = (uint32_t)need;
     }
