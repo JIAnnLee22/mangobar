@@ -482,6 +482,17 @@ static struct udev_monitor *g_udev_mon;
 static int g_udev_fd = -1;
 static bool brightness_dirty;
 
+// Custom module realtime-signal triggers (SIGRTMIN+N, like Waybar's custom
+// module "signal" option). The handler only sets flags and pokes an eventfd;
+// the event loop wakes up and re-runs the affected modules.
+static volatile sig_atomic_t custom_signal_dirty[MANGOBAR_MAX_CUSTOM];
+static struct {
+  int signo;
+  int ci;
+} custom_signal_map[MANGOBAR_MAX_CUSTOM];
+static int custom_signal_count;
+static int signal_fd = -1;
+
 static const struct wl_pointer_listener pointer_listener;
 
 static MangobarTray *tray;
@@ -3639,8 +3650,11 @@ static bool update_custom_modules(void) {
     MangoCustomModule *cm = &g_cfg.customs[i];
     if (!cm->enabled || !cm->exec[0])
       continue;
+    bool sig_dirty = custom_signal_dirty[i];
+    custom_signal_dirty[i] = 0;
     uint64_t due = (uint64_t)(cm->interval > 0 ? cm->interval : 0) * 1000u;
-    if (cm->last_run_ms == 0 || (due > 0 && now - cm->last_run_ms >= due)) {
+    if (sig_dirty || cm->last_run_ms == 0 ||
+        (due > 0 && now - cm->last_run_ms >= due)) {
       if (run_custom_module(cm))
         changed = true;
     }
@@ -3653,14 +3667,64 @@ static void tray_set_dirty() {
   wl_list_for_each(b, &bar_list, link) b->redraw = true;
 }
 
+static void custom_signal_handler(int signo) {
+  for (int i = 0; i < custom_signal_count; i++) {
+    if (custom_signal_map[i].signo == signo) {
+      custom_signal_dirty[custom_signal_map[i].ci] = 1;
+      break;
+    }
+  }
+  if (signal_fd >= 0) {
+    uint64_t one = 1;
+    ssize_t r = write(signal_fd, &one, sizeof(one));
+    (void)r;
+  }
+}
+
+// Install SIGRTMIN+N handlers for custom modules that declare a "signal".
+static void register_custom_signals(void) {
+  signal_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (signal_fd < 0)
+    return;
+  for (int i = 0; i < g_cfg.custom_count; i++) {
+    MangoCustomModule *cm = &g_cfg.customs[i];
+    if (!cm->enabled || cm->signal <= 0)
+      continue;
+    int signo = SIGRTMIN + cm->signal;
+    if (signo > SIGRTMAX) {
+      IPC_LOG("[signal] custom-%s: signal %d out of range (max %d)\n",
+              cm->name, cm->signal, SIGRTMAX - SIGRTMIN);
+      continue;
+    }
+    if (custom_signal_count < MANGOBAR_MAX_CUSTOM) {
+      custom_signal_map[custom_signal_count].signo = signo;
+      custom_signal_map[custom_signal_count].ci = i;
+      custom_signal_count++;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = custom_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(signo, &sa, NULL);
+    IPC_LOG("[signal] custom-%s registered on SIGRTMIN+%d (%d)\n", cm->name,
+            cm->signal, signo);
+  }
+}
+
 static void event_loop() {
   int wl_fd = wl_display_get_fd(display);
   while (running) {
     int tray_fd = tray ? tray_get_fd(tray) : -1;
-    struct pollfd fds[5];
+    struct pollfd fds[6];
     int nfds = 0, ipc_idx = -1, tray_idx = -1, pa_idx = -1, udev_idx = -1;
+    int signal_idx = -1;
     fds[nfds++] =
         (struct pollfd){.fd = wl_fd, .events = POLLIN | POLLERR | POLLHUP};
+    if (signal_fd >= 0) {
+      signal_idx = nfds;
+      fds[nfds++] = (struct pollfd){.fd = signal_fd, .events = POLLIN};
+    }
     if (ipc_fd >= 0) {
       ipc_idx = nfds;
       fds[nfds++] = (struct pollfd){.fd = ipc_fd, .events = POLLIN};
@@ -3726,6 +3790,11 @@ static void event_loop() {
       } else {
         wl_display_cancel_read(display);
       }
+    }
+    if (signal_idx >= 0 && (fds[signal_idx].revents & POLLIN)) {
+      uint64_t v;
+      while (read(signal_fd, &v, sizeof(v)) > 0)
+        ;
     }
     if (ipc_idx >= 0 && (fds[ipc_idx].revents & POLLIN)) {
       ssize_t n = read(ipc_fd, ipc_buf + ipc_buf_len,
@@ -4052,6 +4121,7 @@ int main() {
   update_custom_modules();
   pulse_init();
   udev_init();
+  register_custom_signals();
   signal(SIGTERM, exit);
   signal(SIGINT, exit);
   signal(SIGCHLD, SIG_IGN); // reap action command children
@@ -4076,6 +4146,8 @@ int main() {
     pa_mainloop_free(pa_ml);
   if (pulse_event_fd >= 0)
     close(pulse_event_fd);
+  if (signal_fd >= 0)
+    close(signal_fd);
   if (g_udev_mon)
     udev_monitor_unref(g_udev_mon);
   if (g_udev)

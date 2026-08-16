@@ -38,6 +38,7 @@ typedef struct {
   char exec[256]; // command that prints the module text
   char format[256]; // format string; "{}" is replaced with exec output
   int interval; // refresh interval in seconds
+  int signal; // SIGRTMIN+N used to trigger an update (0 = none)
   char output[256]; // latest command output
   uint64_t last_run_ms;
   bool enabled;

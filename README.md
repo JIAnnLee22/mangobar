@@ -202,6 +202,12 @@ same JSONC file:
     "format": "󰅐 {}",
     "on-scroll-up": "brightnessctl s +5%",
     "on-scroll-down": "brightnessctl s 5%-"
+},
+"custom/pacman": {
+    "exec": "checkupdates | wc -l",
+    "signal": 8,
+    "format": "󰮯 {}",
+    "on-click": "sudo pacman -Syu && pkill -RTMIN+8 mangobar"
 }
 ```
 
@@ -209,6 +215,11 @@ Fields:
 
 - `exec`: command whose stdout becomes the module text (trailing newline trimmed)
 - `interval`: refresh interval in seconds; `0`/omitted runs once at startup
+- `signal`: realtime signal number `N` that re-runs the module. Mangobar
+  listens on `SIGRTMIN+N` (like Waybar) and updates the module whenever the
+  signal arrives, e.g. `pkill -RTMIN+8 mangobar`. With `signal` set and no
+  `interval`, the script runs once at startup and then only on the signal;
+  with both set, it also refreshes on the interval.
 - `format`: shown as-is, with `{}` replaced by the exec output; if omitted the
   raw exec output is shown
 - `on-click` / `on-click-middle` / `on-click-right` / `on-scroll-up` /

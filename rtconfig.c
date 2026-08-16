@@ -318,6 +318,7 @@ static void parse_custom_module(cJSON *obj, const char *name) {
     return;
   cfg_str(obj, "exec", cm->exec, sizeof(cm->exec));
   cm->interval = cfg_int(obj, "interval", 0);
+  cm->signal = cfg_int(obj, "signal", 0);
   cfg_str(obj, "format", cm->format, sizeof(cm->format));
 
   char css_name[64];
