@@ -378,7 +378,7 @@ static void format_network_alt(const char *fmt, const char *ifname,
 }
 
 // ---------- Bar ----------
-#define MAX_HOTSPOTS 64
+#define MAX_HOTSPOTS 256
 #define MAX_TRAY_HOTSPOTS 16
 
 typedef struct {
@@ -928,7 +928,7 @@ static void draw_tray_icon(pixman_image_t *dst, pixman_image_t *icon,
   pixman_image_unref(scaled);
 }
 
-#define MAX_MODULE_ENTRIES 64
+#define MAX_MODULE_ENTRIES 128
 
 typedef struct {
   const char *text;
@@ -956,6 +956,25 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
   char *dst;
   time_t now = time(NULL);
   struct tm *tm = localtime(&now);
+
+  // Custom modules use ids M_CUSTOM + index, so they can't be matched by a
+  // single switch case; handle them before the fixed-module switch.
+  if (id >= M_CUSTOM && id < M_CUSTOM + MANGOBAR_MAX_CUSTOM) {
+    int ci = id - M_CUSTOM;
+    if (!custom_module_text(bar, ci, texts[(*text_n)], 256,
+                            names[(*name_n)], 96))
+      return 0;
+    ModuleEntry *me = &ents[n++];
+    *me = (ModuleEntry){.text = texts[(*text_n)++],
+                        .st = &st_custom[ci],
+                        .module = names[(*name_n)++],
+                        .tag = -1};
+    int ml = module_max_length(me->module);
+    if (ml > 0)
+      truncate_utf8_string((char *)me->text, me->text, 256, ml);
+    return n;
+  }
+
   switch (id) {
   case M_TAGS:
     if (bar->overview_mode) {
@@ -1165,13 +1184,6 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                                   .tray_icon_size = tsize};
       }
     }
-    break;
-  case M_CUSTOM:
-    if (custom_module_text(bar, id - M_CUSTOM, texts[(*text_n)], 256,
-                           names[(*name_n)], 96))
-      ents[n++] = (ModuleEntry){.text = texts[(*text_n)++],
-                                .st = &st_custom[id - M_CUSTOM],
-                                .module = names[(*name_n)++], .tag = -1};
     break;
   default:
     break;
@@ -1959,7 +1971,7 @@ static const MangoAction *find_action(const char *module) {
 // Per-module scroll debounce: scrolls inside the interval reset the timer,
 // so a continuous scroll only triggers the first event.
 static uint64_t now_ms(void);
-#define MAX_SCROLL_TRACK 32
+#define MAX_SCROLL_TRACK 128
 static char scroll_track_module[MAX_SCROLL_TRACK][32];
 static uint64_t scroll_track_last[MAX_SCROLL_TRACK];
 static int scroll_track_count;
