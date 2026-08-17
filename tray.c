@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "tray.h"
+#include "sd-bus.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -12,8 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <systemd/sd-bus.h>
-#include <systemd/sd-bus-vtable.h>
 #include <unistd.h>
 
 #define WATCHER_PATH "/StatusNotifierWatcher"
