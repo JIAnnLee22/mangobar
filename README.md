@@ -118,8 +118,11 @@ The JSONC config supports `height`, `layer`, `buffer-scale`, `css`
 come from JSONC and CSS; fonts are set in CSS only (`font-family`,
 `font-size`, `font-weight`). See [`config.jsonc`](config.jsonc) for a complete
 example. Any module can be placed in `modules-left`, `modules-center` or
-`modules-right`; left is anchored to the left edge, right to the right edge
-and center is centered between them.
+`modules-right`; left is anchored to the left edge, right to the right edge.
+When `modules-center` is non-empty, those modules are forced to the true
+screen center and the left/right groups only take the remaining space on
+their own side; without center modules the left group expands toward the
+right group (the window module absorbs the squeeze) as before.
 
 `scroll-interval` (ms, default `0` = disabled) debounces scroll actions per
 module: repeated scrolls inside the interval keep resetting the timer, so a

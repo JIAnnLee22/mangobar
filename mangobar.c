@@ -1369,7 +1369,50 @@ static void draw_bar(Bar *bar) {
   uint32_t right_group_left =
       right_edge > right_total_w ? right_edge - right_total_w : 0;
 
-  // --- Left modules (limited by right group) ---
+  // --- Center modules (built first: their width decides how much space the
+  // left/right groups get) ---
+  ModuleEntry center_ents[MAX_MODULE_ENTRIES];
+  char center_texts[MAX_MODULE_ENTRIES][256];
+  char center_names[MAX_MODULE_ENTRIES][96];
+  int ctext_n = 0, cname_n = 0;
+  int center_n =
+      build_module_entries(bar, g_cfg.center_order, g_cfg.center_count,
+                           center_ents, MAX_MODULE_ENTRIES, center_texts,
+                           center_names, &ctext_n, &cname_n);
+  uint32_t center_cw = 0;
+  uint32_t center_title_w = 0;
+  bool center_has_title = false;
+  for (int i = 0; i < center_n; i++) {
+    uint32_t ew = module_entry_width(&center_ents[i]);
+    center_cw += ew;
+    if (strcmp(center_ents[i].module, "title") == 0) {
+      center_title_w = ew;
+      center_has_title = true;
+    }
+  }
+  // When center modules exist they are forced to the true screen center; the
+  // left/right groups only get the remaining space on their own side. Without
+  // center modules the old squeeze behavior is kept unchanged.
+  uint32_t center_left = 0, center_right = 0, center_max = 0;
+  uint32_t center_title_avail = 0;
+  if (center_n > 0) {
+    uint32_t usable = right_edge > bar_left ? right_edge - bar_left : 0;
+    center_left = center_cw < usable ? bar_left + (usable - center_cw) / 2
+                                     : bar_left;
+    center_right = center_left + center_cw;
+    center_max = center_right < right_edge ? center_right : right_edge;
+    if (center_has_title) {
+      uint32_t fixed_w = center_cw - center_title_w;
+      uint32_t space = center_max > center_left &&
+                               center_max - center_left > fixed_w
+                           ? center_max - center_left - fixed_w
+                           : 0;
+      uint32_t title_min = center_title_w < 48 ? center_title_w : 48;
+      center_title_avail = space > title_min ? space : title_min;
+    }
+  }
+
+  // --- Left modules (limited by center group or right group) ---
   ModuleEntry scratch[MAX_MODULE_ENTRIES];
   char scratch_texts[MAX_MODULE_ENTRIES][256];
   char scratch_names[MAX_MODULE_ENTRIES][96];
@@ -1391,11 +1434,10 @@ static void draw_bar(Bar *bar) {
       fixed_left_w += module_entry_width(&scratch[i]);
     }
   }
-  // The left group never takes space away from the right group. The window is
-  // the only flexible module and absorbs the squeeze, so fixed modules (which
-  // may come before or after the window) keep their natural width whenever
-  // possible.
-  uint32_t left_max = right_group_left;
+  // The window is the only flexible module and absorbs the squeeze, so fixed
+  // modules (which may come before or after the window) keep their natural
+  // width whenever possible.
+  uint32_t left_max = center_n > 0 ? center_left : right_group_left;
   uint32_t title_avail = 0;
   if (has_title) {
     uint32_t space = 0;
@@ -1425,11 +1467,23 @@ static void draw_bar(Bar *bar) {
   uint32_t left_end = x;
 
   // Right group start: tray first, then right modules
-  uint32_t right_start = right_group_left;
-  if (right_start < left_end)
-    right_start = left_end;
-  if (right_start > right_edge)
-    right_start = right_edge;
+  uint32_t right_start;
+  if (center_n > 0) {
+    // Right-aligned within the space to the right of the center group.
+    right_start = center_right;
+    uint32_t rg_left =
+        right_edge > right_total_w ? right_edge - right_total_w : 0;
+    if (rg_left > right_start)
+      right_start = rg_left;
+    if (right_start > right_edge)
+      right_start = right_edge;
+  } else {
+    right_start = right_group_left;
+    if (right_start < left_end)
+      right_start = left_end;
+    if (right_start > right_edge)
+      right_start = right_edge;
+  }
 
   // Middle background
   if (right_start > left_end) {
@@ -1440,49 +1494,24 @@ static void draw_bar(Bar *bar) {
                           .y1 = bar_top * s, .y2 = (bar_top + bar_h) * s});
   }
 
-  // --- Center modules ---
-  stext_n = 0;
-  sname_n = 0;
-  int center_n =
-      build_module_entries(bar, g_cfg.center_order, g_cfg.center_count,
-                           scratch, MAX_MODULE_ENTRIES, scratch_texts,
-                           scratch_names, &stext_n, &sname_n);
-  if (center_n > 0 && right_start > left_end) {
-    uint32_t cw = 0;
-    uint32_t title_w = 0;
-    bool has_title = false;
-    for (int i = 0; i < center_n; i++) {
-      uint32_t ew = module_entry_width(&scratch[i]);
-      cw += ew;
-      if (strcmp(scratch[i].module, "title") == 0) {
-        title_w = ew;
-        has_title = true;
-      }
-    }
-    uint32_t avail = right_start - left_end;
-    uint32_t title_avail = 0;
-    if (has_title) {
-      uint32_t fixed_w = cw - title_w;
-      uint32_t space = avail > fixed_w ? avail - fixed_w : 0;
-      uint32_t title_min = title_w < 48 ? title_w : 48;
-      title_avail = space > title_min ? space : title_min;
-    }
-    uint32_t cx = cw < avail ? left_end + (avail - cw) / 2 : left_end;
-    for (int i = 0; i < center_n && cx < right_start; i++) {
-      const char *text = scratch[i].text;
+  // --- Center modules (drawn at the true screen center) ---
+  if (center_n > 0) {
+    uint32_t cx = center_left;
+    for (int i = 0; i < center_n && cx < center_max; i++) {
+      const char *text = center_ents[i].text;
       char fit[256];
-      if (strcmp(scratch[i].module, "title") == 0 && title_avail > 0 &&
-          right_start > cx) {
-        uint32_t ta = right_start - cx;
-        if (ta > title_avail)
-          ta = title_avail;
+      if (strcmp(center_ents[i].module, "title") == 0 &&
+          center_title_avail > 0 && center_max > cx) {
+        uint32_t ta = center_max - cx;
+        if (ta > center_title_avail)
+          ta = center_title_avail;
         fit_text_width(text, fit, sizeof(fit), ta,
-                       scratch[i].st->pad_l + scratch[i].st->pad_r);
+                       center_ents[i].st->pad_l + center_ents[i].st->pad_r);
         text = fit;
       }
-      ModuleEntry me = scratch[i];
+      ModuleEntry me = center_ents[i];
       me.text = text;
-      cx = draw_module_entry(bar, &me, cx, y, fg, fg_mask, bg, right_start,
+      cx = draw_module_entry(bar, &me, cx, y, fg, fg_mask, bg, center_max,
                              bar_h);
     }
   }
