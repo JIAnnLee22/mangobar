@@ -6,6 +6,10 @@ project('mangobar', 'c',
 cc = meson.get_compiler('c')
 add_project_arguments(cc.get_supported_arguments('-Wno-unused-parameter'),
                       language: 'c')
+
+sdbus_dep = dependency('libsystemd', 'libelogind', 'basu')
+add_project_arguments('-D' + 'SDBUS_' + sdbus_dep.name().to_upper(), language: 'c')
+
 deps = [
   dependency('threads'),
   dependency('wayland-client'),
@@ -16,7 +20,7 @@ deps = [
   dependency('pango'),
   dependency('pangocairo'),
   dependency('libpulse'),
-  dependency('libsystemd'),
+  sdbus_dep,
   dependency('libudev'),
   dependency('gdk-pixbuf-2.0'),
   dependency('alsa'),

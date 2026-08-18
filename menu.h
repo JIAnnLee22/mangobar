@@ -1,9 +1,10 @@
 #ifndef MANGOBAR_MENU_H
 #define MANGOBAR_MENU_H
 
+#include "sd-bus.h"
+
 #include <stdbool.h>
 #include <stdint.h>
-#include <systemd/sd-bus.h>
 
 typedef struct MangobarMenu MangobarMenu;
 typedef struct MangobarMenuNode MangobarMenuNode;
