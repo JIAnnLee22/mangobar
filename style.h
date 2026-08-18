@@ -19,7 +19,7 @@ typedef struct {
     int margin_top;
     int margin_left;
     int margin_right;
-    int radius; // corner radius; 0 = use default
+    int radius; // corner radius; -1 = pill, >=0 explicit (0 = square)
     int min_width; // minimum module width
     bool color_set;
     bool background_set;

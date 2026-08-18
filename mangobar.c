@@ -178,7 +178,7 @@ typedef struct {
   pixman_color_t fg, bg;
   int pad_l, pad_r;
   int margin_l, margin_r;
-  int radius; // 0=default, -1=pill, >0=explicit radius
+  int radius; // -1=pill, >=0 explicit radius (0=square)
   int min_width; // minimum module width
   bool center; // center text (tag buttons)
 } ModuleStyle;
@@ -732,13 +732,11 @@ static void record_tray_hotspot(Bar *bar, MangobarTrayItem *item, uint32_t x1,
 
 // Draw a module (background + text + record hotspot)
 static int module_radius(const ModuleStyle *st, uint32_t h) {
-  int r = st->radius > 0 ? st->radius : g_cfg.radius_default;
+  int r = st->radius;
   if (st->radius < 0)
     r = (int)h / 2;
   if (r > (int)h / 2)
     r = (int)h / 2;
-  if (r < 0)
-    r = 0;
   return r;
 }
 
@@ -4040,6 +4038,10 @@ static void init_styles() {
   for (int i = 0; i < MANGOBAR_MAX_CUSTOM; i++) {
     st_custom[i].radius = g_cfg.radius_default;
   }
+  // Tags/layout default to pill shape; CSS border-radius overrides this.
+  for (int i = 0; i < 5; i++)
+    st_tags[i].radius = -1;
+  st_layout.radius = -1;
   for (int i = 0; i < 5; i++)
     st_tags[i].center = true;
   st_layout.center = true;
@@ -4196,13 +4198,12 @@ int main() {
   int min_h = font->ascent + font->descent + 4;
   if ((int)bar_h < min_h)
     bar_h = (uint32_t)min_h;
-  // Keep tag/layout buttons circular.
+  // Keep tag/layout buttons at least as wide as the bar is tall (so the pill
+  // default reads as a circle). CSS border-radius still controls the shape.
   for (int i = 0; i < 5; i++) {
-    st_tags[i].radius = -1;
     st_tags[i].min_width =
         (int)bar_h + st_tags[i].margin_l + st_tags[i].margin_r;
   }
-  st_layout.radius = -1;
   st_layout.min_width =
       (int)bar_h + st_layout.margin_l + st_layout.margin_r;
   display = wl_display_connect(NULL);
