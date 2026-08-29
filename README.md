@@ -6,6 +6,21 @@ The system tray (StatusNotifierItem / DBusMenu) is inspired by
 
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/6c1ab40e-96fe-41a8-9d8a-89c45fa24db8" />
 
+## Documentation
+
+The full user documentation lives in the
+**[mangobar wiki](https://github.com/mangowm/mangobar.wiki)**:
+
+- [Installation](https://github.com/mangowm/mangobar.wiki/wiki/Installation) —
+  dependencies, build, Nix, Home Manager
+- [Configuration](https://github.com/mangowm/mangobar.wiki/wiki/Configuration) —
+  bar options, module placement, `max-length`, scrolling, module actions
+- [Module pages](https://github.com/mangowm/mangobar.wiki/wiki/Module:-Tags) —
+  one page per module (tags, window, cpu, memory, brightness, volume, clock,
+  network, battery, tray, ...)
+- [Styling](https://github.com/mangowm/mangobar.wiki/wiki/Styling) —
+  CSS subset, `@define-color`, gradients and `mix()`
+- [Custom modules](https://github.com/mangowm/mangobar.wiki/wiki/Module:-Custom)
 
 ## Install
 
@@ -70,8 +85,6 @@ nix build .#mangobar
 ./result/bin/mangobar
 ```
 
-
-
 ### Home Manager
 
 The flake exports a Home Manager module. Add it to your flake inputs and
@@ -105,163 +118,7 @@ services.mangobar.settings = {
 };
 ```
 
-## Usage
+## Example
 
-Run `mangobar` inside a mangowm session. It reads configuration from:
-
-1. `$MANGOBAR_CONFIG`
-2. `~/.config/mangobar/config.jsonc`
-
-The JSONC config supports `height`, `layer`, `buffer-scale`, `css`
-(or `style`), and per-module `format`, `interval`, `on-click`,
-`on-scroll-*` etc. Unsupported modules are ignored. All runtime settings
-come from JSONC and CSS; fonts are set in CSS only (`font-family`,
-`font-size`, `font-weight`). See [`config.jsonc`](config.jsonc) for a complete
-example. Any module can be placed in `modules-left`, `modules-center` or
-`modules-right`; left is anchored to the left edge, right to the right edge.
-When `modules-center` is non-empty, those modules are forced to the true
-screen center and the left/right groups only take the remaining space on
-their own side; without center modules the left group expands toward the
-right group (the window module absorbs the squeeze) as before.
-
-`scroll-interval` (ms, default `0` = disabled) debounces scroll actions per
-module: repeated scrolls inside the interval keep resetting the timer, so a
-continuous scroll only triggers once. It can be set at the top level or in a
-module block (`"workspaces": { ..., "scroll-interval": 100 }`), where the
-module value wins.
-
-`smooth-scrolling-threshold` controls how much continuous pointer-axis motion
-(such as a touchpad two-finger gesture) produces one scroll action. It defaults
-to `5.0`. Mangobar accumulates motion independently for horizontal and vertical
-axes, preserving any amount below the threshold for the next frame. Discrete
-mouse-wheel steps continue to use their protocol-provided step count. Set it
-at the top level for all modules, or in a module block (as in Waybar) to
-override that module:
-
-```jsonc
-"backlight": { "smooth-scrolling-threshold": 5.0 }
-```
-
-Every module accepts `"max-length"` (in pixels of rendered text width,
-`0` = unlimited, the default for all modules). The `window` module is
-squeezed by the other modules when no limit is set: it shows fully up to
-the remaining bar width, or up to `"max-length"` when configured. Truncated
-text gets a `...` suffix.
-
-`buffer-scale` is a multiplier on top of the output's Wayland scale
-(default `1`); leave it at `1` to follow the display's HiDPI scale
-automatically. Text, icons and menus are rendered at the effective scale
-so they stay sharp.
-
-Any module with a `format` can also set `format-alt`; a left click toggles
-between the two formats (the module's `on-click` command still runs if
-configured). The network module additionally supports `{down}` / `{up}` in
-its format strings, e.g. `"format-alt": "↓{down} ↑{up}"` for live speeds.
-
-CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
-
-## Modules
-
-- `tags` / `layout` / `title` / `keymode` / `keyboardlayout`: from mangowm IPC
-  (`workspaces` also accepts `pinned` — tag numbers kept visible even when
-  empty — and `tag-names`, an array of custom labels, index 0 = tag 1)
-- `cpu`: `{usage}` is the CPU usage percent and `{load}` is the 1-minute
-  load average (two decimals); `mem` reads `/proc`
-- `brightness`: read `/sys/class/backlight` (auto-detected or the JSONC
-  `device` field); updates immediately on external changes via udev
-- `volume`: read via the PulseAudio library, with ALSA fallback; shows mute
-  state and updates immediately on external changes via PulseAudio events
-- `clock`: time (`#clock`) and date (`#clock.date`) with separate CSS;
-  date names follow the system locale (e.g. Chinese month/weekday names)
-- `network`: shows the active interface name; click toggles up/down speeds
-  (KB/s below 1MB/s, MB/s otherwise)
-- `hideclients`: shows the hidden-window count for the monitor; the module
-  hides itself while the count is zero
-- `battery`: charge percent and status (`{percent}`, `{status}`, `{icon}`);
-  shows the first battery found by default. On multi-battery laptops each
-  battery can be shown separately by placing `battery#BAT0`, `battery#BAT1`,
-  ... in a modules-* list and configuring them under the same keys, e.g.
-  `"battery#BAT0": { "format": "{icon} {percent}%" }`. Each instance accepts
-  its own `format`, `icons`, `icon-charging`/`icon-full`/`icon-ac`,
-  `hide-on-ac` and click/scroll actions; a battery that is unplugged simply
-  hides its module. The plain `battery` module can still use the `device`
-  field to pick a specific battery instead of the first one;
-  `"icons"` is an array of nerd-font icons shown by charge level while
-  discharging, `icon-charging` / `icon-full` override the charging/full
-  states, and `{ac}` / `icon-ac` mark a plugged-in adapter;
-  `"hide-on-ac": true` hides the module entirely while plugged in
-- `brightness` / `volume`: `"icons"` arrays switch the `{icon}` by level
-  (e.g. `["󰃚", "󰃛", "󰃜", "󰃝", "󰃞", "󰃟"]`); volume also has `icon-muted`
-  and `{bt}` / `icon-bluetooth` to show a bluetooth mark when the active
-  sink is a bluetooth device
-- `tray`: StatusNotifierItem / DBusMenu, with a side-opening submenu
-- `custom/<name>`: user-defined modules (see below)
-
-## Custom modules
-
-Add `custom/<name>` to `modules-left` or `modules-right` and define it in the
-same JSONC file:
-
-```jsonc
-"custom/power": {
-    "format": "󰣇",
-    "on-click": "wlogout",
-    "on-click-right": "swaync-client -t -sw"
-},
-"custom/uptime": {
-    "exec": "uptime -p | sed 's/^up //'",
-    "interval": 60,
-    "format": "󰅐 {}",
-    "on-scroll-up": "brightnessctl s +5%",
-    "on-scroll-down": "brightnessctl s 5%-"
-},
-"custom/pacman": {
-    "exec": "checkupdates | wc -l",
-    "signal": 8,
-    "format": "󰮯 {}",
-    "on-click": "sudo pacman -Syu && pkill -RTMIN+8 mangobar"
-}
-```
-
-Fields:
-
-- `exec`: command whose stdout becomes the module text (trailing newline trimmed)
-- `interval`: refresh interval in seconds; `0`/omitted runs once at startup
-- `signal`: realtime signal number `N` that re-runs the module. Mangobar
-  listens on `SIGRTMIN+N` (like Waybar) and updates the module whenever the
-  signal arrives, e.g. `pkill -RTMIN+8 mangobar`. With `signal` set and no
-  `interval`, the script runs once at startup and then only on the signal;
-  with both set, it also refreshes on the interval.
-- `format`: shown as-is, with `{}` replaced by the exec output; if omitted the
-  raw exec output is shown
-- `on-click` / `on-click-middle` / `on-click-right` / `on-scroll-up` /
-  `on-scroll-down`: shell commands or `@ipc:xxx` commands
-
-Custom modules are styled with `#custom-<name>` selectors, e.g.
-`#custom-power { background-color: #cc241d; color: #ffffff; }`.
-
-Right-click a tray item with a menu to open a context menu; clicking outside
-closes it.
-
-## Styling
-
-`~/.config/mangobar/style.css` supports a small CSS subset: `color`,
-`background`, `padding`, `margin`, `border-radius`, `min-width`,
-`font-family/size/weight`, and `@define-color`. Backgrounds accept real
-two-color `linear-gradient(to top|bottom|left|right, c1, c2)`; stops can use
-`@vars` and `mix(color1, color2, ratio)` (e.g. Waybar's
-`background: linear-gradient(to top, @a, mix(@a, @b, 0.25))`).
-Selectors: `*`, `#module`, `#module.state`, and `#custom-<name>`;
-workspace buttons also match `#workspaces button` / `#workspaces
-button:hover` (aliases of `#tags` / `#tags:hover`) with a real hover state.
-
-See [`style.css.example`](style.css.example).
-
-## Module actions
-
-Actions are configured through the JSONC config's `on-click` /
-`on-scroll-*` fields. Special commands:
-
-- `@view` / `@toggle`: switch / toggle a tag over IPC
-- `@ipc:xxx`: send `xxx` verbatim over IPC
-- anything else: run via `/bin/sh -c`
+See [`config.jsonc`](config.jsonc) and
+[`style.css.example`](style.css.example) for complete examples.
