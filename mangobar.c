@@ -1324,12 +1324,41 @@ static uint32_t draw_tray_entry(Bar *bar, const ModuleEntry *e, uint32_t x,
   if (tray_x1 + tray_body_w > max_x)
     tray_body_w = max_x > tray_x1 ? max_x - tray_x1 : 0;
   if (bar_bg_cr && tray_body_w > 0) {
-    double tr, tg, tb, ta;
-    pixman_color_to_doubles(&st_tray.bg, &tr, &tg, &tb, &ta);
-    cairo_set_source_rgba(bar_bg_cr, tr, tg, tb, ta);
+    cairo_pattern_t *pat = NULL;
+    if (st_tray.bg_gradient) {
+      double x1d = (double)tray_x1, y1d = (double)bar_top;
+      double x2d = (double)(tray_x1 + tray_body_w), y2d = (double)bar_top;
+      if (st_tray.gradient_dir == 1) { // to top: vertical, bottom -> top
+        x2d = x1d;
+        y1d = (double)(bar_top + buf_h);
+        y2d = (double)bar_top;
+      } else if (st_tray.gradient_dir == 2) { // to left: right -> left
+        y2d = y1d;
+        x1d = (double)(tray_x1 + tray_body_w);
+        x2d = (double)tray_x1;
+      } else if (st_tray.gradient_dir == 3) { // to right: left -> right
+        y2d = y1d;
+      } else { // to bottom: vertical, top -> bottom
+        x2d = x1d;
+        y2d = (double)(bar_top + buf_h);
+      }
+      double r0, g0, b0, a0, r1, g1, b1, a1;
+      pixman_color_to_doubles(&st_tray.bg, &r0, &g0, &b0, &a0);
+      pixman_color_to_doubles(&st_tray.gradient_end, &r1, &g1, &b1, &a1);
+      pat = cairo_pattern_create_linear(x1d, y1d, x2d, y2d);
+      cairo_pattern_add_color_stop_rgba(pat, 0.0, r0, g0, b0, a0);
+      cairo_pattern_add_color_stop_rgba(pat, 1.0, r1, g1, b1, a1);
+      cairo_set_source(bar_bg_cr, pat);
+    } else {
+      double tr, tg, tb, ta;
+      pixman_color_to_doubles(&st_tray.bg, &tr, &tg, &tb, &ta);
+      cairo_set_source_rgba(bar_bg_cr, tr, tg, tb, ta);
+    }
     cairo_rounded_rect(bar_bg_cr, tray_x1, bar_top, (double)tray_body_w,
                        (double)buf_h, module_radius(&st_tray, buf_h));
     cairo_fill(bar_bg_cr);
+    if (pat)
+      cairo_pattern_destroy(pat);
   }
   uint32_t cur = tray_x1;
   int tpad = st_tray.pad_l > 0 ? st_tray.pad_l : g_cfg.tray_pad;
