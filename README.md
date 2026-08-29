@@ -142,10 +142,11 @@ override that module:
 "backlight": { "smooth-scrolling-threshold": 5.0 }
 ```
 
-Every module accepts `"max-length"` (in characters, `0` = unlimited, the
-default for all modules). The `window` module is squeezed by the other
-modules when no limit is set: it shows fully up to the remaining bar width,
-or up to `"max-length"` when configured. Truncated text gets a `...` suffix.
+Every module accepts `"max-length"` (in pixels of rendered text width,
+`0` = unlimited, the default for all modules). The `window` module is
+squeezed by the other modules when no limit is set: it shows fully up to
+the remaining bar width, or up to `"max-length"` when configured. Truncated
+text gets a `...` suffix.
 
 `buffer-scale` is a multiplier on top of the output's Wayland scale
 (default `1`); leave it at `1` to follow the display's HiDPI scale

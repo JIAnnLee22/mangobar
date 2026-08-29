@@ -938,12 +938,31 @@ typedef struct {
   int tray_icon_size;
 } ModuleEntry;
 
-// Per-module max display length; 0 = unlimited.
+// Per-module max display width in pixels; 0 = unlimited.
 static int module_max_length(const char *module) {
   for (int i = 0; i < g_cfg.max_len_count; i++)
     if (strcmp(g_cfg.max_lens[i].module, module) == 0)
       return g_cfg.max_lens[i].max_length;
   return 0;
+}
+
+// Truncate text so its rendered width (with "...") is at most max_px.
+static void truncate_text_to_width(char *dest, const char *src,
+                                   size_t dest_size, uint32_t max_px) {
+  char tmp[256];
+  int maxc = 256;
+  while (maxc > 0) {
+    truncate_utf8_string(tmp, src, sizeof(tmp), maxc);
+    int32_t mn, mx;
+    uint32_t tw = text_metrics(tmp, &mn, &mx);
+    if (tw <= max_px || maxc <= 1) {
+      snprintf(dest, dest_size, "%s", tmp);
+      return;
+    }
+    // Step down by 8, but never skip the one-character fallback.
+    maxc = maxc > 8 ? maxc - 8 : 1;
+  }
+  dest[0] = '\0';
 }
 
 // Fill entries for one module id; returns the number of entries added.
@@ -969,7 +988,7 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                         .tag = -1};
     int ml = module_max_length(me->module);
     if (ml > 0)
-      truncate_utf8_string((char *)me->text, me->text, 256, ml);
+      truncate_text_to_width((char *)me->text, me->text, 256, (uint32_t)ml);
     return n;
   }
 
@@ -1186,14 +1205,15 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
   default:
     break;
   }
-  // Apply per-module max length to the formatted text (tags keep their
-  // short labels untouched).
+  // Apply per-module max width to the formatted text (tags keep their short
+  // labels untouched).
   for (int i = 0; i < n; i++) {
     if (strcmp(ents[i].module, "tags") == 0)
       continue;
     int ml = module_max_length(ents[i].module);
     if (ml > 0)
-      truncate_utf8_string((char *)ents[i].text, ents[i].text, 256, ml);
+      truncate_text_to_width((char *)ents[i].text, ents[i].text, 256,
+                             (uint32_t)ml);
   }
   return n;
 }
@@ -1210,15 +1230,17 @@ static int build_module_entries(Bar *bar, const int *order, int count,
 }
 
 // Truncate text to available width (with "..."), for the window module.
+// `extra` is the module's horizontal padding + margins: the text plus that
+// amount must fit inside `avail` so the whole module box stays within bounds.
 static void fit_text_width(const char *text, char *out, size_t outsz,
-                           uint32_t avail, uint32_t pads) {
+                           uint32_t avail, uint32_t extra) {
   char tmp[256];
   int maxc = 256;
   while (maxc > 0) {
     truncate_utf8_string(tmp, text, sizeof(tmp), maxc);
     int32_t mn, mx;
     uint32_t tw = text_metrics(tmp, &mn, &mx);
-    if (tw + pads + 16 <= avail || maxc <= 1) {
+    if (tw + extra <= avail || maxc <= 1) {
       snprintf(out, outsz, "%s", tmp);
       return;
     }
@@ -1456,8 +1478,12 @@ static void draw_bar(Bar *bar) {
       uint32_t avail = left_max - x;
       if (avail > title_avail)
         avail = title_avail;
-      fit_text_width(text, fit, sizeof(fit), avail,
-                     scratch[i].st->pad_l + scratch[i].st->pad_r);
+      uint32_t extra = scratch[i].st->pad_l + scratch[i].st->pad_r +
+                       scratch[i].st->margin_l + scratch[i].st->margin_r;
+      int tml = module_max_length("title");
+      if (tml > 0 && avail > (uint32_t)tml + extra)
+        avail = (uint32_t)tml + extra;
+      fit_text_width(text, fit, sizeof(fit), avail, extra);
       text = fit;
     }
     ModuleEntry me = scratch[i];
@@ -1505,8 +1531,13 @@ static void draw_bar(Bar *bar) {
         uint32_t ta = center_max - cx;
         if (ta > center_title_avail)
           ta = center_title_avail;
-        fit_text_width(text, fit, sizeof(fit), ta,
-                       center_ents[i].st->pad_l + center_ents[i].st->pad_r);
+        uint32_t extra = center_ents[i].st->pad_l + center_ents[i].st->pad_r +
+                         center_ents[i].st->margin_l +
+                         center_ents[i].st->margin_r;
+        int tml = module_max_length("title");
+        if (tml > 0 && ta > (uint32_t)tml + extra)
+          ta = (uint32_t)tml + extra;
+        fit_text_width(text, fit, sizeof(fit), ta, extra);
         text = fit;
       }
       ModuleEntry me = center_ents[i];
@@ -1748,11 +1779,9 @@ static void update_bar_json(Bar *bar, cJSON *json) {
     cJSON *a = cJSON_GetObjectItem(client, "appid");
     const char *title_str = (t && cJSON_IsString(t)) ? t->valuestring : "";
     const char *appid_str = (a && cJSON_IsString(a)) ? a->valuestring : "";
-    int tml = module_max_length("title");
-    if (tml > 0)
-      truncate_utf8_string(bar->title, title_str, sizeof(bar->title), tml);
-    else
-      snprintf(bar->title, sizeof(bar->title), "%s", title_str);
+    // Keep the full title; pixel limits are applied when the module text is
+    // built and drawn (truncate_utf8_string only guards the buffer boundary).
+    truncate_utf8_string(bar->title, title_str, sizeof(bar->title), 250);
     snprintf(bar->appid, sizeof(bar->appid), "%s", appid_str);
   } else {
     bar->title[0] = '\0';

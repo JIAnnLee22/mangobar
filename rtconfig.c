@@ -384,7 +384,7 @@ static void parse_modules(cJSON *root) {
 static void parse_module_configs(cJSON *root) {
   cJSON *m;
 
-  // Per-module max-length (0 = unlimited)
+  // Per-module max-length in pixels (0 = unlimited)
   g_cfg.max_len_count = 0;
   cJSON *child;
   cJSON_ArrayForEach(child, root) {
