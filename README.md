@@ -178,6 +178,14 @@ CSS priority is `$MANGOBAR_CSS` > `~/.config/mangobar/style.css`.
 - `hideclients`: shows the hidden-window count for the monitor; the module
   hides itself while the count is zero
 - `battery`: charge percent and status (`{percent}`, `{status}`, `{icon}`);
+  shows the first battery found by default. On multi-battery laptops each
+  battery can be shown separately by placing `battery#BAT0`, `battery#BAT1`,
+  ... in a modules-* list and configuring them under the same keys, e.g.
+  `"battery#BAT0": { "format": "{icon} {percent}%" }`. Each instance accepts
+  its own `format`, `icons`, `icon-charging`/`icon-full`/`icon-ac`,
+  `hide-on-ac` and click/scroll actions; a battery that is unplugged simply
+  hides its module. The plain `battery` module can still use the `device`
+  field to pick a specific battery instead of the first one;
   `"icons"` is an array of nerd-font icons shown by charge level while
   discharging, `icon-charging` / `icon-full` override the charging/full
   states, and `{ac}` / `icon-ac` mark a plugged-in adapter;

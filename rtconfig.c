@@ -310,6 +310,51 @@ static MangoCustomModule *find_custom(const char *name) {
   return cm;
 }
 
+static MangoBatteryCfg *lookup_battery(const char *name) {
+  for (int i = 0; i < g_cfg.battery_count; i++)
+    if (strcmp(g_cfg.batteries[i].name, name) == 0)
+      return &g_cfg.batteries[i];
+  return NULL;
+}
+
+static MangoBatteryCfg *find_battery(const char *name) {
+  MangoBatteryCfg *bc = lookup_battery(name);
+  if (bc) {
+    bc->enabled = true;
+    return bc;
+  }
+  if (g_cfg.battery_count >= MANGOBAR_MAX_BATTERIES)
+    return NULL;
+  bc = &g_cfg.batteries[g_cfg.battery_count++];
+  // batteries[0] holds the defaults; inherit them for battery#<device> too
+  *bc = g_cfg.batteries[0];
+  snprintf(bc->name, sizeof(bc->name), "%s", name);
+  bc->enabled = true;
+  if (strncmp(name, "battery#", 8) == 0)
+    snprintf(bc->device, sizeof(bc->device), "%.31s", name + 8);
+  else
+    bc->device[0] = '\0';
+  return bc;
+}
+
+static void parse_battery_module(cJSON *m, MangoBatteryCfg *bc) {
+  cfg_str(m, "format", bc->fmt, sizeof(bc->fmt));
+  if (strcmp(bc->name, "battery") == 0)
+    cfg_str(m, "device", bc->device, sizeof(bc->device));
+  cfg_str(m, "icon-charging", bc->icon_charging, sizeof(bc->icon_charging));
+  cfg_str(m, "icon-full", bc->icon_full, sizeof(bc->icon_full));
+  cfg_str(m, "icon-discharging", bc->icon_discharging,
+          sizeof(bc->icon_discharging));
+  cfg_str(m, "icon-ac", bc->icon_ac, sizeof(bc->icon_ac));
+  // Only replace icons when the key is present, so battery#BAT0/BAT1 without
+  // their own "icons" inherit the default level icons.
+  if (cJSON_GetObjectItemCaseSensitive(m, "icons"))
+    cfg_icons(m, "icons", bc->icons, &bc->icon_count, MANGOBAR_MAX_ICONS);
+  bc->hide_on_ac = cfg_bool(m, "hide-on-ac", bc->hide_on_ac);
+  cfg_alt(m, bc->name);
+  set_module_actions(m, bc->name);
+}
+
 // Parse a custom/<name> module definition
 static void parse_custom_module(cJSON *obj, const char *name) {
   // Only configure modules that were actually placed in a modules-* list
@@ -363,6 +408,12 @@ static void parse_module_list(cJSON *root, const char *key, int *order,
       MangoCustomModule *cm = find_custom(name + 7);
       if (cm)
         add_module(order, count, M_CUSTOM + (cm - g_cfg.customs));
+      continue;
+    }
+    if (strcmp(name, "battery") == 0 || strncmp(name, "battery#", 8) == 0) {
+      MangoBatteryCfg *bc = find_battery(name);
+      if (bc)
+        add_module(order, count, M_BATTERY + (bc - g_cfg.batteries));
       continue;
     }
     int id = module_id(name);
@@ -640,29 +691,16 @@ static void parse_module_configs(cJSON *root) {
     set_action_smooth_threshold("hideclients", m);
   }
 
-  m = cJSON_GetObjectItemCaseSensitive(root, "battery");
-  if (cJSON_IsObject(m)) {
-    cfg_str(m, "format", g_cfg.battery_fmt, sizeof(g_cfg.battery_fmt));
-    cfg_str(m, "device", g_cfg.battery_dev, sizeof(g_cfg.battery_dev));
-    cfg_str(m, "icon-charging", g_cfg.battery_icon_charging,
-            sizeof(g_cfg.battery_icon_charging));
-    cfg_str(m, "icon-full", g_cfg.battery_icon_full,
-            sizeof(g_cfg.battery_icon_full));
-    cfg_str(m, "icon-discharging", g_cfg.battery_icon_discharging,
-            sizeof(g_cfg.battery_icon_discharging));
-    cfg_str(m, "icon-ac", g_cfg.battery_icon_ac,
-            sizeof(g_cfg.battery_icon_ac));
-    cfg_icons(m, "icons", g_cfg.battery_icons, &g_cfg.battery_icon_count,
-              MANGOBAR_MAX_ICONS);
-    g_cfg.hide_on_ac = cfg_bool(m, "hide-on-ac", false);
-    cfg_alt(m, "battery");
-    set_action("battery",
-               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
-               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
-               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-right")),
-               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-up")),
-               cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-scroll-down")));
-    set_action_smooth_threshold("battery", m);
+  // Battery instances: "battery" plus "battery#<device>"
+  cJSON_ArrayForEach(child, root) {
+    if (!cJSON_IsObject(child) || !child->string)
+      continue;
+    if (strcmp(child->string, "battery") == 0 ||
+        strncmp(child->string, "battery#", 8) == 0) {
+      MangoBatteryCfg *bc = lookup_battery(child->string);
+      if (bc)
+        parse_battery_module(child, bc);
+    }
   }
 }
 
@@ -712,24 +750,21 @@ void mango_config_defaults(void) {
            "{ifname}");
   snprintf(g_cfg.hide_clients_format, sizeof(g_cfg.hide_clients_format), "%s",
            "{}");
-  snprintf(g_cfg.battery_fmt, sizeof(g_cfg.battery_fmt), "%s",
-           "{icon} {percent}% {status}");
-  snprintf(g_cfg.battery_icon_charging, sizeof(g_cfg.battery_icon_charging),
-           "%s", "󰂄");
-  snprintf(g_cfg.battery_icon_full, sizeof(g_cfg.battery_icon_full), "%s",
-           "󰁹");
-  snprintf(g_cfg.battery_icon_discharging,
-           sizeof(g_cfg.battery_icon_discharging), "%s", "󰁿");
-  snprintf(g_cfg.battery_icon_ac, sizeof(g_cfg.battery_icon_ac), "%s", "");
+  MangoBatteryCfg *bc0 = &g_cfg.batteries[0];
+  g_cfg.battery_count = 1;
+  snprintf(bc0->name, sizeof(bc0->name), "%s", "battery");
+  snprintf(bc0->fmt, sizeof(bc0->fmt), "%s", "{icon} {percent}% {status}");
+  snprintf(bc0->icon_charging, sizeof(bc0->icon_charging), "%s", "󰂄");
+  snprintf(bc0->icon_full, sizeof(bc0->icon_full), "%s", "󰁹");
+  snprintf(bc0->icon_discharging, sizeof(bc0->icon_discharging), "%s", "󰁿");
+  snprintf(bc0->icon_ac, sizeof(bc0->icon_ac), "%s", "");
   static const char *battery_level_icons[] = {
       "󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"};
-  g_cfg.battery_icon_count = 0;
   for (size_t i = 0;
        i < sizeof(battery_level_icons) / sizeof(battery_level_icons[0]) &&
-       g_cfg.battery_icon_count < MANGOBAR_MAX_ICONS;
+       bc0->icon_count < MANGOBAR_MAX_ICONS;
        i++)
-    snprintf(g_cfg.battery_icons[g_cfg.battery_icon_count++], 16, "%s",
-             battery_level_icons[i]);
+    snprintf(bc0->icons[bc0->icon_count++], 16, "%s", battery_level_icons[i]);
   static const char *brightness_level_icons[] = {
       "󰃚", "󰃛", "󰃜", "󰃝", "󰃞", "󰃟"};
   g_cfg.brightness_icon_count = 0;

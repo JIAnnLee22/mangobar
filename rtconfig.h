@@ -9,6 +9,7 @@
 #define MANGOBAR_MAX_ACTIONS 128
 #define MANGOBAR_MAX_MODULES 64
 #define MANGOBAR_MAX_CUSTOM 64
+#define MANGOBAR_MAX_BATTERIES 16
 #define MANGOBAR_MAX_ALTS 128
 #define MANGOBAR_MAX_ICONS 64
 #define MANGOBAR_MAX_LENS 128
@@ -43,6 +44,21 @@ typedef struct {
   uint64_t last_run_ms;
   bool enabled;
 } MangoCustomModule;
+
+// Per-instance battery module ("battery" + "battery#<device>")
+typedef struct {
+  char name[40]; // module name used for hotspots/actions: "battery" or "battery#BAT0"
+  char device[32]; // sysfs name to read; "" = first battery found
+  char fmt[64];
+  char icon_charging[16];
+  char icon_full[16];
+  char icon_discharging[16];
+  char icon_ac[16];
+  char icons[MANGOBAR_MAX_ICONS][16];
+  int icon_count;
+  bool hide_on_ac;
+  bool enabled; // placed in a modules-* list
+} MangoBatteryCfg;
 
 typedef struct {
   char module[32];
@@ -100,21 +116,14 @@ typedef struct {
   char keyboardlayout_format[64];
   char network_format[64];
   char hide_clients_format[64];
-  char battery_dev[64];
-  char battery_fmt[64];
-  char battery_icon_charging[16];
-  char battery_icon_full[16];
-  char battery_icon_discharging[16];
-  char battery_icon_ac[16];
-  char battery_icons[MANGOBAR_MAX_ICONS][16];
-  int battery_icon_count;
+  MangoBatteryCfg batteries[MANGOBAR_MAX_BATTERIES];
+  int battery_count;
   char brightness_icons[MANGOBAR_MAX_ICONS][16];
   int brightness_icon_count;
   char volume_icons[MANGOBAR_MAX_ICONS][16];
   int volume_icon_count;
   char volume_muted_icon[16];
   char volume_bt_icon[16];
-  bool hide_on_ac;
   int left_order[MANGOBAR_MAX_MODULES];
   int left_count;
   int center_order[MANGOBAR_MAX_MODULES];

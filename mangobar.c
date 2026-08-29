@@ -417,10 +417,10 @@ typedef struct {
   int cpu_pct, mem_pct;
   double cpu_load;
   int hideclients;
-  int battery_pct;
-  bool battery_present;
-  bool battery_on_ac;
-  char battery_status[16];
+  int battery_pct[MANGOBAR_MAX_BATTERIES];
+  bool battery_present[MANGOBAR_MAX_BATTERIES];
+  bool battery_on_ac[MANGOBAR_MAX_BATTERIES];
+  char battery_status[MANGOBAR_MAX_BATTERIES][16];
   bool volume_bt;
   int brightness_pct, volume_pct;
   bool volume_muted;
@@ -992,6 +992,33 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     return n;
   }
 
+  // Battery instances use ids M_BATTERY + index into g_cfg.batteries, so
+  // "battery" and "battery#BAT0"/"battery#BAT1" can be shown separately.
+  if (id >= M_BATTERY && id < M_BATTERY + MANGOBAR_MAX_BATTERIES) {
+    int bi = id - M_BATTERY;
+    if (bi >= g_cfg.battery_count)
+      return 0;
+    MangoBatteryCfg *bc = &g_cfg.batteries[bi];
+    if (!bc->enabled || !bar->battery_present[bi])
+      return 0;
+    if (bc->hide_on_ac && bar->battery_on_ac[bi])
+      return 0;
+    const char *icon;
+    if (strncmp(bar->battery_status[bi], "Charging", 8) == 0)
+      icon = bc->icon_charging;
+    else if (strncmp(bar->battery_status[bi], "Full", 4) == 0)
+      icon = bc->icon_full;
+    else
+      icon = level_icon(bc->icons, bc->icon_count, bar->battery_pct[bi]);
+    dst = texts[(*text_n)++];
+    format_battery(module_fmt(bc->name, bc->fmt, bar), bar->battery_pct[bi],
+                   bar->battery_status[bi], icon,
+                   bar->battery_on_ac[bi] ? bc->icon_ac : "", dst, 256);
+    ents[n++] = (ModuleEntry){.text = dst, .st = &st_battery,
+                              .module = bc->name, .tag = -1};
+    return n;
+  }
+
   switch (id) {
   case M_TAGS:
     if (bar->overview_mode) {
@@ -1158,25 +1185,6 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
                  bar->hideclients, "", dst, 256);
       ents[n++] = (ModuleEntry){.text = dst, .st = &st_hide_clients,
                                 .module = "hideclients", .tag = -1};
-    }
-    break;
-  case M_BATTERY:
-    if (bar->battery_present && !(g_cfg.hide_on_ac && bar->battery_on_ac)) {
-      const char *icon;
-      if (strncmp(bar->battery_status, "Charging", 8) == 0)
-        icon = g_cfg.battery_icon_charging;
-      else if (strncmp(bar->battery_status, "Full", 4) == 0)
-        icon = g_cfg.battery_icon_full;
-      else
-        icon = level_icon(g_cfg.battery_icons, g_cfg.battery_icon_count,
-                          bar->battery_pct);
-      dst = texts[(*text_n)++];
-      format_battery(module_fmt("battery", g_cfg.battery_fmt, bar),
-                     bar->battery_pct, bar->battery_status, icon,
-                     bar->battery_on_ac ? g_cfg.battery_icon_ac : "", dst,
-                     256);
-      ents[n++] = (ModuleEntry){.text = dst, .st = &st_battery,
-                                .module = "battery", .tag = -1};
     }
     break;
   case M_TRAY:
@@ -3637,58 +3645,76 @@ static void update_volume() {
   }
 }
 
-// Battery: percent + status from /sys/class/power_supply, AC online detect
+// Battery: scan /sys/class/power_supply and fill per-instance state so
+// "battery" (first battery found) and "battery#BAT0"/"battery#BAT1" can be
+// shown separately. Re-scanning every update also picks up batteries that are
+// hot-plugged or removed.
 static void update_battery(void) {
-  static char dev[64];
-  static bool dev_set;
-  if (!g_cfg.battery_dev[0] && !dev_set) {
-    dev_set = true;
-    DIR *d = opendir("/sys/class/power_supply");
-    if (d) {
-      struct dirent *e;
-      while ((e = readdir(d))) {
-        char p[320], type[32] = {0};
-        snprintf(p, sizeof(p), "/sys/class/power_supply/%s/type", e->d_name);
-        FILE *f = fopen(p, "r");
-        if (f) {
-          if (fgets(type, sizeof(type), f) &&
-              strncmp(type, "Battery", 7) == 0)
-            snprintf(dev, sizeof(dev), "%.63s", e->d_name);
-          fclose(f);
-          if (dev[0])
-            break;
-        }
-      }
-      closedir(d);
-    }
-  }
-  const char *dname = g_cfg.battery_dev[0] ? g_cfg.battery_dev : dev;
-  int pct = -1;
-  bool charging = false;
-  char status[16] = "Unknown";
-  if (dname[0]) {
-    char p[320];
-    snprintf(p, sizeof(p), "/sys/class/power_supply/%s/capacity", dname);
-    FILE *f = fopen(p, "r");
-    if (f) {
-      if (fscanf(f, "%d", &pct) != 1)
-        pct = -1;
-      fclose(f);
-    }
-    snprintf(p, sizeof(p), "/sys/class/power_supply/%s/status", dname);
-    f = fopen(p, "r");
-    if (f) {
-      char st[32] = {0};
-      if (fgets(st, sizeof(st), f)) {
-        st[strcspn(st, "\n")] = '\0';
-        snprintf(status, sizeof(status), "%s", st);
-        charging = strncmp(st, "Charging", 8) == 0;
-      }
-      fclose(f);
-    }
-  }
-  bool on_ac = charging;
+  char devs[MANGOBAR_MAX_BATTERIES][32];
+  int caps[MANGOBAR_MAX_BATTERIES];
+  char status[MANGOBAR_MAX_BATTERIES][16];
+  bool have[MANGOBAR_MAX_BATTERIES] = {false};
+  int n = 0;
+  bool any_charging = false;
+
   DIR *d = opendir("/sys/class/power_supply");
+  if (d) {
+    struct dirent *e;
+    while ((e = readdir(d)) && n < MANGOBAR_MAX_BATTERIES) {
+      char p[320], type[32] = {0};
+      snprintf(p, sizeof(p), "/sys/class/power_supply/%s/type", e->d_name);
+      FILE *f = fopen(p, "r");
+      if (!f || !fgets(type, sizeof(type), f) ||
+          strncmp(type, "Battery", 7) != 0) {
+        if (f)
+          fclose(f);
+        continue;
+      }
+      fclose(f);
+
+      char st[32] = {0};
+      snprintf(p, sizeof(p), "/sys/class/power_supply/%s/status", e->d_name);
+      f = fopen(p, "r");
+      if (f) {
+        if (fgets(st, sizeof(st), f)) {
+          st[strcspn(st, "\n")] = '\0';
+          if (strncmp(st, "Charging", 8) == 0)
+            any_charging = true;
+        }
+        fclose(f);
+      }
+
+      int cap = -1;
+      snprintf(p, sizeof(p), "/sys/class/power_supply/%s/capacity", e->d_name);
+      f = fopen(p, "r");
+      if (f) {
+        if (fscanf(f, "%d", &cap) != 1)
+          cap = -1;
+        fclose(f);
+      }
+
+      // Keep devices sorted so the default "battery" is always the first one
+      // (e.g. BAT0) regardless of readdir order.
+      int ins = n;
+      while (ins > 0 && strcmp(e->d_name, devs[ins - 1]) < 0) {
+        snprintf(devs[ins], sizeof(devs[ins]), "%s", devs[ins - 1]);
+        caps[ins] = caps[ins - 1];
+        snprintf(status[ins], sizeof(status[ins]), "%s", status[ins - 1]);
+        have[ins] = have[ins - 1];
+        ins--;
+      }
+      snprintf(devs[ins], sizeof(devs[ins]), "%.31s", e->d_name);
+      caps[ins] = cap;
+      snprintf(status[ins], sizeof(status[ins]), "%s",
+               st[0] ? st : "Unknown");
+      have[ins] = cap >= 0;
+      n++;
+    }
+    closedir(d);
+  }
+
+  bool on_ac = any_charging;
+  d = opendir("/sys/class/power_supply");
   if (d) {
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -3712,12 +3738,39 @@ static void update_battery(void) {
     }
     closedir(d);
   }
+
   Bar *b;
   wl_list_for_each(b, &bar_list, link) {
-    b->battery_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-    b->battery_present = pct >= 0;
-    b->battery_on_ac = on_ac;
-    snprintf(b->battery_status, sizeof(b->battery_status), "%s", status);
+    for (int i = 0; i < g_cfg.battery_count; i++) {
+      const MangoBatteryCfg *bc = &g_cfg.batteries[i];
+      int idx = -1;
+      if (bc->device[0]) {
+        for (int j = 0; j < n; j++)
+          if (strcmp(devs[j], bc->device) == 0) {
+            idx = j;
+            break;
+          }
+      } else if (n > 0) {
+        idx = 0; // default: first battery
+      }
+      if (idx >= 0 && have[idx]) {
+        int pct = caps[idx];
+        if (pct < 0)
+          pct = 0;
+        if (pct > 100)
+          pct = 100;
+        b->battery_pct[i] = pct;
+        b->battery_present[i] = true;
+        snprintf(b->battery_status[i], sizeof(b->battery_status[i]), "%s",
+                 status[idx]);
+      } else {
+        b->battery_pct[i] = 0;
+        b->battery_present[i] = false;
+        snprintf(b->battery_status[i], sizeof(b->battery_status[i]), "%s",
+                 "Unknown");
+      }
+      b->battery_on_ac[i] = on_ac;
+    }
   }
 }
 
