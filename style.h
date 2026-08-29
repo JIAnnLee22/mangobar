@@ -13,6 +13,9 @@
 typedef struct {
     uint32_t color; // ARGB foreground
     uint32_t background; // ARGB background
+    uint32_t gradient_end; // ARGB end color for linear-gradient backgrounds
+    int gradient_dir; // 0=to bottom (default) 1=to top 2=to left 3=to right
+    bool bg_gradient; // background is a linear gradient (start = background)
     uint32_t border_color; // ARGB border (menu)
     int padding_left;
     int padding_right;
@@ -72,6 +75,14 @@ int style_sheet_parse(StyleSheet *ss, const char *buf);
 // Resolve final style for module+state in cascade order:
 // "*", "#module", "#module.state"; later rules override earlier ones
 Style style_resolve(const StyleSheet *ss, const char *module, const char *state);
+
+// Resolve only the #module / #module.state rules (skip "*"), so aliases like
+// #workspaces can be overlaid without re-applying the global defaults.
+Style style_resolve_module_only(const StyleSheet *ss, const char *module,
+                                const char *state);
+
+// Overlay `over` on top of `base`: fields set in `over` replace base values.
+Style style_overlay(const Style *base, const Style *over);
 
 // Build an fcft font string from CSS font settings.
 // Returns fallback when no font is set. Static buffer.

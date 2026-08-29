@@ -147,6 +147,185 @@ static int resolve_color_value(const StyleSheet *ss, const char *val,
   return 0;
 }
 
+// Mix two ARGB colors with ratio t (0..1), interpolating each channel.
+static uint32_t mix_colors(uint32_t a, uint32_t b, double t) {
+  if (t < 0.0)
+    t = 0.0;
+  if (t > 1.0)
+    t = 1.0;
+  uint32_t out = 0;
+  for (int sh = 0; sh < 32; sh += 8) {
+    double ca = (a >> sh) & 0xFF;
+    double cb = (b >> sh) & 0xFF;
+    out |= (uint32_t)(ca + (cb - ca) * t + 0.5) << sh;
+  }
+  return out;
+}
+
+// Resolve a single color token: #hex, @var, or mix(color, color, t).
+static int parse_color_token(const StyleSheet *ss, const char *tok,
+                             uint32_t *out, int depth) {
+  if (depth > 8)
+    return 0;
+  while (*tok && isspace((unsigned char)*tok))
+    tok++;
+  if (strncmp(tok, "mix(", 4) == 0) {
+    const char *p = tok + 4;
+    // Split the arguments on top-level commas (track paren depth).
+    const char *args[3] = {NULL, NULL, NULL};
+    int ai = 0;
+    int depth2 = 0;
+    const char *start = p;
+    for (; *p && ai < 3; p++) {
+      if (*p == '(')
+        depth2++;
+      else if (*p == ')') {
+        if (depth2 == 0)
+          break;
+        depth2--;
+      } else if (*p == ',' && depth2 == 0) {
+        if (ai < 3)
+          args[ai++] = start;
+        start = p + 1;
+      }
+    }
+    if (ai == 2) {
+      args[2] = start;
+      char tbuf[32] = {0};
+      uint32_t c1, c2;
+      const char *q = args[2];
+      size_t n = 0;
+      while (*q && *q != ')' && n + 1 < sizeof(tbuf))
+        tbuf[n++] = *q++;
+      if (parse_color_token(ss, args[0], &c1, depth + 1) &&
+          parse_color_token(ss, args[1], &c2, depth + 1)) {
+        *out = mix_colors(c1, c2, atof(tbuf));
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (*tok == '@') {
+    char name[64];
+    size_t n = 0;
+    tok++;
+    while (tok[n] && !isspace((unsigned char)tok[n]) && tok[n] != ',' &&
+           tok[n] != ')' && n + 1 < sizeof(name))
+      {
+        name[n] = tok[n];
+        n++;
+      }
+    name[n] = '\0';
+    const char *v = find_var(ss, name);
+    return v ? parse_color_token(ss, v, out, depth + 1) : 0;
+  }
+  if (*tok == '#') {
+    // Truncate at delimiters so a trailing ')' from a gradient is ignored.
+    char buf[16];
+    size_t n = 0;
+    while (tok[n] && n + 1 < sizeof(buf) &&
+           !isspace((unsigned char)tok[n]) && tok[n] != ')' && tok[n] != ',')
+      {
+        buf[n] = tok[n];
+        n++;
+      }
+    buf[n] = '\0';
+    return parse_hex_color(buf, out);
+  }
+  if (strncmp(tok, "transparent", 11) == 0 ||
+      strncmp(tok, "none", 4) == 0) {
+    *out = 0;
+    return 1;
+  }
+  return 0;
+}
+
+// Parse "linear-gradient(to top, c1, c2)" (or to bottom/left/right; plain
+// two-color gradients; stops may use @vars and mix()). Fills start/end ARGB
+// and direction. Returns 1 on success.
+static int parse_linear_gradient(const StyleSheet *ss, const char *val,
+                                 uint32_t *c1, uint32_t *c2, int *dir) {
+  const char *p = val;
+  while (*p && isspace((unsigned char)*p))
+    p++;
+  if (strncasecmp(p, "linear-gradient", 15) != 0)
+    return 0;
+  p += 15;
+  while (*p && isspace((unsigned char)*p))
+    p++;
+  if (*p != '(')
+    return 0;
+  p++;
+
+  // Everything until the matching ')' is the argument list.
+  int depth = 1;
+  const char *start = p;
+  while (*p && depth > 0) {
+    if (*p == '(')
+      depth++;
+    else if (*p == ')')
+      depth--;
+    if (depth > 0)
+      p++;
+  }
+  size_t len = (size_t)(p - start);
+  if (len == 0)
+    return 0;
+  char argbuf[512];
+  if (len >= sizeof(argbuf))
+    len = sizeof(argbuf) - 1;
+  memcpy(argbuf, start, len);
+  argbuf[len] = '\0';
+
+  *dir = 0; // default: to bottom
+  char *q = argbuf;
+  while (*q && isspace((unsigned char)*q))
+    q++;
+  if (strncmp(q, "to ", 3) == 0) {
+    q += 3;
+    while (*q && isspace((unsigned char)*q))
+      q++;
+    if (strncmp(q, "top", 3) == 0) {
+      *dir = 1;
+      q += 3;
+    } else if (strncmp(q, "bottom", 6) == 0) {
+      *dir = 0;
+      q += 6;
+    } else if (strncmp(q, "left", 4) == 0) {
+      *dir = 2;
+      q += 4;
+    } else if (strncmp(q, "right", 5) == 0) {
+      *dir = 3;
+      q += 5;
+    }
+    while (*q && *q != ',')
+      q++;
+    if (*q == ',')
+      q++;
+  }
+
+  // Split the two color stops on top-level commas.
+  const char *stops[2] = {q, NULL};
+  int si = 1;
+  int d2 = 0;
+  char *s = q;
+  for (; *s && si < 2; s++) {
+    if (*s == '(')
+      d2++;
+    else if (*s == ')') {
+      if (d2 > 0)
+        d2--;
+    } else if (*s == ',' && d2 == 0) {
+      stops[si++] = s + 1;
+      *s = '\0';
+    }
+  }
+  if (si < 2)
+    return 0;
+  return parse_color_token(ss, stops[0], c1, 0) &&
+         parse_color_token(ss, stops[1], c2, 0);
+}
+
 // Parse 1-2 ints: one value -> all sides; two -> vertical, horizontal
 static void parse_int_pair(const char *s, int *a, int *b) {
   *a = parse_int(s);
@@ -174,12 +353,22 @@ static void apply_decl(StyleSheet *ss, Style *st, const char *prop,
       parse_hex_color(color_buf, &c)) {
     st->color = c;
     st->color_set = true;
-  } else if ((strcmp(prop, "background") == 0 ||
-              strcmp(prop, "background-color") == 0) &&
-             resolve_color_value(ss, val, color_buf, sizeof(color_buf)) &&
-             parse_hex_color(color_buf, &c)) {
-    st->background = c;
-    st->background_set = true;
+  } else if (strcmp(prop, "background") == 0 ||
+             strcmp(prop, "background-color") == 0) {
+    uint32_t c1, c2;
+    int dir;
+    if (parse_linear_gradient(ss, val, &c1, &c2, &dir)) {
+      st->background = c1;
+      st->gradient_end = c2;
+      st->gradient_dir = dir;
+      st->bg_gradient = true;
+      st->background_set = true;
+    } else if (resolve_color_value(ss, val, color_buf, sizeof(color_buf)) &&
+               parse_hex_color(color_buf, &c)) {
+      st->background = c;
+      st->bg_gradient = false;
+      st->background_set = true;
+    }
   } else if (strcmp(prop, "border-color") == 0 &&
              resolve_color_value(ss, val, color_buf, sizeof(color_buf)) &&
              parse_hex_color(color_buf, &c)) {
@@ -280,7 +469,8 @@ static void parse_selector(const char *sel, char *module, size_t msz,
   } else if (*p == '#') {
     p++;
     const char *q = p;
-    while (*q && *q != '.' && !isspace((unsigned char)*q) && *q != '{')
+    while (*q && *q != '.' && *q != ':' && !isspace((unsigned char)*q) &&
+           *q != '{')
       q++;
     size_t n = (size_t)(q - p);
     if (n >= msz)
@@ -510,8 +700,12 @@ static void apply_rule(Style *dst, const StyleRule *r) {
   const Style *s = &r->style;
   if (s->color_set)
     dst->color = s->color;
-  if (s->background_set)
+  if (s->background_set) {
     dst->background = s->background;
+    dst->gradient_end = s->gradient_end;
+    dst->gradient_dir = s->gradient_dir;
+    dst->bg_gradient = s->bg_gradient;
+  }
   if (s->border_color_set)
     dst->border_color = s->border_color;
   if (s->padding_left_set)
@@ -540,6 +734,13 @@ static void apply_rule(Style *dst, const StyleRule *r) {
   dst->min_width_set |= s->min_width_set;
 }
 
+Style style_overlay(const Style *base, const Style *over) {
+  Style d = *base;
+  StyleRule fake = {.style = *over};
+  apply_rule(&d, &fake);
+  return d;
+}
+
 Style style_resolve(const StyleSheet *ss, const char *module,
                     const char *state) {
   Style s = {0};
@@ -563,6 +764,24 @@ Style style_resolve(const StyleSheet *ss, const char *module,
       const StyleRule *r = &ss->rules[i];
       if (strcmp(r->module, module) == 0 &&
           strcmp(r->state, state) == 0)
+        apply_rule(&s, r);
+    }
+  }
+  return s;
+}
+
+Style style_resolve_module_only(const StyleSheet *ss, const char *module,
+                                const char *state) {
+  Style s = {0};
+  for (int i = 0; i < ss->rule_count; i++) {
+    const StyleRule *r = &ss->rules[i];
+    if (strcmp(r->module, module) == 0 && r->state[0] == '\0')
+      apply_rule(&s, r);
+  }
+  if (state && state[0]) {
+    for (int i = 0; i < ss->rule_count; i++) {
+      const StyleRule *r = &ss->rules[i];
+      if (strcmp(r->module, module) == 0 && strcmp(r->state, state) == 0)
         apply_rule(&s, r);
     }
   }

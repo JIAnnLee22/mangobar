@@ -247,8 +247,13 @@ closes it.
 
 `~/.config/mangobar/style.css` supports a small CSS subset: `color`,
 `background`, `padding`, `margin`, `border-radius`, `min-width`,
-`font-family/size/weight`, `@define-color`, and `linear-gradient` (first
-color). Selectors: `*`, `#module`, `#module.state`, and `#custom-<name>`.
+`font-family/size/weight`, and `@define-color`. Backgrounds accept real
+two-color `linear-gradient(to top|bottom|left|right, c1, c2)`; stops can use
+`@vars` and `mix(color1, color2, ratio)` (e.g. Waybar's
+`background: linear-gradient(to top, @a, mix(@a, @b, 0.25))`).
+Selectors: `*`, `#module`, `#module.state`, and `#custom-<name>`;
+workspace buttons also match `#workspaces button` / `#workspaces
+button:hover` (aliases of `#tags` / `#tags:hover`) with a real hover state.
 
 See [`style.css.example`](style.css.example).
 

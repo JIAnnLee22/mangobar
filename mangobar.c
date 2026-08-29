@@ -176,6 +176,9 @@ static void cairo_rounded_rect(cairo_t *cr, double x, double y, double w,
 // ---------- Module style ----------
 typedef struct {
   pixman_color_t fg, bg;
+  pixman_color_t gradient_end;
+  bool bg_gradient;
+  int gradient_dir; // 0=to bottom 1=to top 2=to left 3=to right
   int pad_l, pad_r;
   int margin_l, margin_r;
   int radius; // -1=pill, >=0 explicit radius (0=square)
@@ -183,8 +186,12 @@ typedef struct {
   bool center; // center text (tag buttons)
 } ModuleStyle;
 
+static void apply_css_resolved(ModuleStyle *ms, Style s);
+
 // Tag states: 0=active 1=occupied 2=urgent 3=empty 4=inactive
 static ModuleStyle st_tags[5];
+static ModuleStyle st_tags_hover_scratch;
+static Style st_tag_hover_css;
 static ModuleStyle st_layout, st_title, st_clock, st_clock_date, st_cpu, st_mem;
 static ModuleStyle st_network, st_hide_clients, st_battery;
 static ModuleStyle st_brightness, st_volume;
@@ -417,6 +424,7 @@ typedef struct {
   int cpu_pct, mem_pct;
   double cpu_load;
   int hideclients;
+  int hover_tag; // hovered tag index, -1 = none
   int battery_pct[MANGOBAR_MAX_BATTERIES];
   bool battery_present[MANGOBAR_MAX_BATTERIES];
   bool battery_on_ac[MANGOBAR_MAX_BATTERIES];
@@ -764,12 +772,40 @@ static uint32_t draw_module(Bar *bar, const char *module, int tag,
     int rad = module_radius(st, buf_h);
     // Rounded background
     if (bar_bg_cr) {
-      double r, g, b, a;
-      pixman_color_to_doubles(&st->bg, &r, &g, &b, &a);
-      cairo_set_source_rgba(bar_bg_cr, r, g, b, a);
+      cairo_pattern_t *pat = NULL;
+      if (st->bg_gradient) {
+        double x1d = (double)x1, y1d = (double)bar_top;
+        double x2d = (double)x2, y2d = (double)(bar_top + buf_h);
+        if (st->gradient_dir == 1) { // to top: vertical, bottom -> top
+          x2d = x1d;
+          y1d = (double)(bar_top + buf_h);
+          y2d = (double)bar_top;
+        } else if (st->gradient_dir == 2) { // to left: horizontal, right -> left
+          y2d = y1d;
+          x1d = (double)x2;
+          x2d = (double)x1;
+        } else if (st->gradient_dir == 3) { // to right: horizontal, left -> right
+          y2d = y1d;
+        } else { // to bottom (default): vertical, top -> bottom
+          x2d = x1d;
+        }
+        double r0, g0, b0, a0, r1, g1, b1, a1;
+        pixman_color_to_doubles(&st->bg, &r0, &g0, &b0, &a0);
+        pixman_color_to_doubles(&st->gradient_end, &r1, &g1, &b1, &a1);
+        pat = cairo_pattern_create_linear(x1d, y1d, x2d, y2d);
+        cairo_pattern_add_color_stop_rgba(pat, 0.0, r0, g0, b0, a0);
+        cairo_pattern_add_color_stop_rgba(pat, 1.0, r1, g1, b1, a1);
+        cairo_set_source(bar_bg_cr, pat);
+      } else {
+        double r, g, b, a;
+        pixman_color_to_doubles(&st->bg, &r, &g, &b, &a);
+        cairo_set_source_rgba(bar_bg_cr, r, g, b, a);
+      }
       cairo_rounded_rect(bar_bg_cr, x1, bar_top, (double)(x2 - x1),
                                 (double)buf_h, rad);
       cairo_fill(bar_bg_cr);
+      if (pat)
+        cairo_pattern_destroy(pat);
     } else {
       uint32_t s = g_draw_scale > 0 ? g_draw_scale : 1;
       pixman_image_fill_boxes(
@@ -1040,6 +1076,11 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
           st = &st_tags[1];
         else
           st = &st_tags[3];
+        if (bar->hover_tag == i) {
+          st_tags_hover_scratch = *st;
+          apply_css_resolved(&st_tags_hover_scratch, st_tag_hover_css);
+          st = &st_tags_hover_scratch;
+        }
         ents[n++] = (ModuleEntry){.text = g_cfg.tag_names[i], .st = st,
                                   .module = "tags", .tag = i};
       }
@@ -1724,6 +1765,7 @@ static void registry_global(void *data, struct wl_registry *registry,
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
     Bar *bar = calloc(1, sizeof(Bar));
     bar->registry_name = name;
+    bar->hover_tag = -1;
     bar->wl_output = wl_registry_bind(registry, name, &wl_output_interface, 2);
     wl_output_add_listener(bar->wl_output, &wl_output_listener, bar);
     bar->xdg_output =
@@ -3110,6 +3152,10 @@ static void wl_pointer_leave(void *data, struct wl_pointer *wl_pointer,
   memset(axis_smooth_remainder, 0, sizeof(axis_smooth_remainder));
   frame_has_axis = false;
   axis_stop_mask = 0;
+  if (pointer_bar) {
+    pointer_bar->hover_tag = -1;
+    pointer_bar->redraw = true;
+  }
   pointer_bar = NULL;
 }
 
@@ -3118,6 +3164,21 @@ static void wl_pointer_motion(void *data, struct wl_pointer *wl_pointer,
                               wl_fixed_t surface_y) {
   pointer_x = wl_fixed_to_double(surface_x);
   pointer_y = wl_fixed_to_double(surface_y);
+  if (pointer_bar) {
+    int hover = -1;
+    for (int i = 0; i < pointer_bar->hotspot_count; i++) {
+      const Hotspot *h = &pointer_bar->hotspots[i];
+      if (pointer_x >= h->x1 && pointer_x < h->x2 &&
+          strcmp(h->module, "tags") == 0 && h->tag >= 0) {
+        hover = h->tag;
+        break;
+      }
+    }
+    if (hover != pointer_bar->hover_tag) {
+      pointer_bar->hover_tag = hover;
+      pointer_bar->redraw = true;
+    }
+  }
   if (popup_pointer && pointer_on_sub) {
     int row = popup.item_h > 0 ? (int)(pointer_y / popup.item_h) : -1;
     int vis = menu_node_visible_count(popup.sub_node);
@@ -4116,8 +4177,12 @@ static void event_loop() {
 static void apply_css_resolved(ModuleStyle *ms, Style s) {
   if (s.color_set)
     hex_to_pixman(s.color, &ms->fg);
-  if (s.background_set)
+  if (s.background_set) {
     hex_to_pixman(s.background, &ms->bg);
+    ms->bg_gradient = s.bg_gradient;
+    ms->gradient_dir = s.gradient_dir;
+    hex_to_pixman(s.gradient_end, &ms->gradient_end);
+  }
   if (s.padding_left_set)
     ms->pad_l = s.padding_left;
   if (s.padding_right_set)
@@ -4223,6 +4288,27 @@ static void init_styles() {
   apply_css(&st_tags[2], "tags", "urgent");
   apply_css(&st_tags[3], "tags", "empty");
   apply_css(&st_tags[4], "tags", "inactive");
+  // Waybar-style aliases (#workspaces, #workspaces button:hover): overlay only
+  // the #workspaces rules so the "*" defaults don't clobber the #tags styles.
+  apply_css_resolved(&st_tags[0],
+                     style_resolve_module_only(&g_style_sheet, "workspaces",
+                                               "active"));
+  apply_css_resolved(&st_tags[1],
+                     style_resolve_module_only(&g_style_sheet, "workspaces",
+                                               "occupied"));
+  apply_css_resolved(&st_tags[2],
+                     style_resolve_module_only(&g_style_sheet, "workspaces",
+                                               "urgent"));
+  apply_css_resolved(&st_tags[3],
+                     style_resolve_module_only(&g_style_sheet, "workspaces",
+                                               "empty"));
+  apply_css_resolved(&st_tags[4],
+                     style_resolve_module_only(&g_style_sheet, "workspaces",
+                                               "inactive"));
+  Style hov_tags = style_resolve(&g_style_sheet, "tags", "hover");
+  Style hov_ws =
+      style_resolve_module_only(&g_style_sheet, "workspaces", "hover");
+  st_tag_hover_css = style_overlay(&hov_tags, &hov_ws);
   apply_css(&st_layout, "layout", NULL);
   apply_css(&st_title, "title", NULL);
   apply_css(&st_clock, "clock", NULL);
