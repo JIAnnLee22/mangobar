@@ -9,18 +9,18 @@ The system tray (StatusNotifierItem / DBusMenu) is inspired by
 ## Documentation
 
 The full user documentation lives in the
-**[mangobar wiki](https://github.com/mangowm/mangobar.wiki)**:
+**[mangobar wiki](https://github.com/mangowm/mangobar/wiki)**:
 
-- [Installation](https://github.com/mangowm/mangobar.wiki/wiki/Installation) —
+- [Installation](https://github.com/mangowm/mangobar/wiki/Installation) —
   dependencies, build, Nix, Home Manager
-- [Configuration](https://github.com/mangowm/mangobar.wiki/wiki/Configuration) —
+- [Configuration](https://github.com/mangowm/mangobar/wiki/Configuration) —
   bar options, module placement, `max-length`, scrolling, module actions
-- [Module pages](https://github.com/mangowm/mangobar.wiki/wiki/Module:-Tags) —
+- [Module pages](https://github.com/mangowm/mangobar/wiki/Module:-Tags) —
   one page per module (tags, window, cpu, memory, brightness, volume, clock,
   network, battery, tray, ...)
-- [Styling](https://github.com/mangowm/mangobar.wiki/wiki/Styling) —
+- [Styling](https://github.com/mangowm/mangobar/wiki/Styling) —
   CSS subset, `@define-color`, gradients and `mix()`
-- [Custom modules](https://github.com/mangowm/mangobar.wiki/wiki/Module:-Custom)
+- [Custom modules](https://github.com/mangowm/mangobar/wiki/Module:-Custom)
 
 ## Install
 
